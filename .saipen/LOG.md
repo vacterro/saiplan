@@ -16,9 +16,10 @@
 - 13.08.26 06:38 [E-015] [parent: E-014] RUN: ship -> committed 69c9ebb; publish skipped (no origin configured)
 - 13.08.26 06:38 [E-016] [parent: E-015] [T-009] DEC: T-009 DONE -> done.md step 1: TODO remains -> next SCOUT T-010
 - 13.08.26 06:39 [E-017] [parent: E-016] [T-010] RUN: SCOUT -- no MSVC/zig/gcc on host; nuitka absent; BUT build_windows.ps1 uses --assume-yes-for-downloads (nuitka can self-provision MinGW64) -> attempting documented build path
-- 13.08.26 06:46 [E-018] [parent: E-017] [T-010] RUN: verify -> dist/SAIPLAN/SAIPLAN.exe launches with SAIPLAN_AUTOQUIT_MS=1500 -> exit 0 (log: start + rc 0); copied-folder launch (no SAIPLAN_ROOT override) -> exit 0, exe-adjacent data recreated
-- 13.08.26 06:46 [E-019] [parent: E-018] DEC: build exposed two defects fixed in T-010: saiplan/logging.py shadowed stdlib logging under Nuitka (renamed -> applog.py); entry script relative imports broke standalone __main__ (root main.py shim added; build_windows.ps1 compiles it)
-- 13.08.26 06:47 [E-020] [parent: E-019] [T-010] RUN: review -> independent launch exit 0; pytest 159 passed; ruff clean; diff: applog rename + root main.py shim + build_windows.ps1 (mechanical, no P0/P1)
-- 13.08.26 06:47 [E-021] [parent: E-020] [T-010] DEC: SHIP
-- 13.08.26 06:49 [E-022] [parent: E-021] RUN: ship -> committed dbc8230; publish skipped (no origin configured)
-- 13.08.26 06:49 [E-023] [parent: E-022] [T-010] DEC: T-010 DONE -> T-011 is MANUAL (human on-screen launch + polish pass, spec 24); no agent-workable TODO remains -> phase BLOCKED, WAIT for human
+- 13.08.26 06:40 [E-018] [parent: E-017] [T-010] RUN: verify -> dist/SAIPLAN/SAIPLAN.exe launches with SAIPLAN_AUTOQUIT_MS=1500 -> exit 0 (log: start + rc 0); copied-folder launch (no SAIPLAN_ROOT override) -> exit 0, exe-adjacent data recreated
+- 13.08.26 06:40 [E-019] [parent: E-018] DEC: build exposed two defects fixed in T-010: saiplan/logging.py shadowed stdlib logging under Nuitka (renamed -> applog.py); entry script relative imports broke standalone __main__ (root main.py shim added; build_windows.ps1 compiles it)
+- 13.08.26 06:41 [E-020] [parent: E-019] [T-010] RUN: review -> independent launch exit 0; pytest 159 passed; ruff clean; diff: applog rename + root main.py shim + build_windows.ps1 (mechanical, no P0/P1)
+- 13.08.26 06:41 [E-021] [parent: E-020] [T-010] DEC: SHIP
+- 13.08.26 06:41 [E-022] [parent: E-021] RUN: ship -> committed dbc8230; publish skipped (no origin configured)
+- 13.08.26 06:41 [E-023] [parent: E-022] [T-010] DEC: T-010 DONE -> T-011 is MANUAL (human on-screen launch + polish pass, spec 24); no agent-workable TODO remains -> phase BLOCKED, WAIT for human
+- 13.08.26 06:41 [E-024] [parent: E-023] DEC: repaired ahead-stamped LOG lines per CORE 1.2 -- E-018..E-023 were written at estimated minutes 06:46..06:49 (up to 7m ahead of real UTC); restamped to 06:40..06:41, minutes inherited from real commit dbc8230 @06:41:05Z and file mtimes, not measured per-event; no line content changed, ids untouched
