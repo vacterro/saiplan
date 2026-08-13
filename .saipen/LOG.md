@@ -20,3 +20,5 @@
 - 13.08.26 06:46 [E-019] [parent: E-018] DEC: build exposed two defects fixed in T-010: saiplan/logging.py shadowed stdlib logging under Nuitka (renamed -> applog.py); entry script relative imports broke standalone __main__ (root main.py shim added; build_windows.ps1 compiles it)
 - 13.08.26 06:47 [E-020] [parent: E-019] [T-010] RUN: review -> independent launch exit 0; pytest 159 passed; ruff clean; diff: applog rename + root main.py shim + build_windows.ps1 (mechanical, no P0/P1)
 - 13.08.26 06:47 [E-021] [parent: E-020] [T-010] DEC: SHIP
+- 13.08.26 06:49 [E-022] [parent: E-021] RUN: ship -> committed dbc8230; publish skipped (no origin configured)
+- 13.08.26 06:49 [E-023] [parent: E-022] [T-010] DEC: T-010 DONE -> T-011 is MANUAL (human on-screen launch + polish pass, spec 24); no agent-workable TODO remains -> phase BLOCKED, WAIT for human

@@ -1,12 +1,11 @@
 # Board
 
 ## DOING
-- [/] T-010 Nuitka portable build via build_windows.ps1 | owner: opencode | claim_time: 2026-08-13T06:38:10Z | verify: dist/SAIPLAN/SAIPLAN.exe exists and launches with SAIPLAN_AUTOQUIT_MS -> exit 0 (requires MSVC build tools)
 
 ## TODO
-- [ ] T-011 Real on-screen launch + manual polish pass of the §24 definition-of-done checklist | verify: MANUAL -- human launches SAIPLAN.exe, walks TODO->DOING->DONE, switches all 16 themes
 
 ## DONE
+- [x] T-010 Nuitka portable build via build_windows.ps1 | verify: dist/SAIPLAN/SAIPLAN.exe exists and launches with SAIPLAN_AUTOQUIT_MS -> exit 0 (Nuitka self-provisioned MinGW; committed dbc8230)
 - [x] T-009 AI boundary interface: PlanProposal dataclass + structural validator in core (spec §16 "prepare interfaces, no provider soup"); provider adapters produce it, human accepts, tickets enter TODO | verify: tests/test_ai_boundary.py -> 9 passed; full suite 159 passed; committed 69c9ebb
 - [x] T-008 Version-control the project: git init, .gitignore sweep, first commit of the whole SAIPLAN tree | verify: git log -1 -> e92bb9a initial commit covering src/tests/docs/themes/sounds/.saipen; git status --porcelain clean
 - [x] T-012 Hotkey resolution defect: Latin letters must map to fixed virtual keys (VkKeyScanW returns -1 for a/k/K on non-Latin layouts, e.g. RU 0x0419); symbols stay layout-aware | verify: tests/test_platform.py asserts fixed VK for Ctrl+K / Ctrl+Shift+K and only the contract for symbols; full suite pytest -q -> 150 passed
@@ -19,3 +18,4 @@
 - [x] T-007 Entry point + release tooling: main.py (logging->layout->single-instance->window, autoquit CI hook), build_windows.ps1, offscreen subprocess smoke | verify: pytest tests/test_main_entry.py -> 2 passed; ruff check src tests clean
 
 ## BLOCKED
+- [ ] T-011 Real on-screen launch + manual polish pass of the §24 definition-of-done checklist | blocker: manual on-screen human pass required -- agent verified offscreen launch (exit 0) + copied-folder portability, but the real GUI walk and all-16-themes switch need a human at the machine | verify: MANUAL -- human launches SAIPLAN.exe, walks TODO->DOING->DONE, switches all 16 themes
