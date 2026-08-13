@@ -1,14 +1,14 @@
 # Board
 
 ## DOING
-- [/] T-009 AI boundary interface: PlanProposal dataclass + structural validator in core (spec §16 "prepare interfaces, no provider soup"); provider adapters produce it, human accepts, tickets enter TODO | owner: opencode | claim_time: 2026-08-13T06:33:10Z | verify: tests/test_ai_boundary.py passes a valid proposal into BOARD TODO and rejects a malformed one
+- [/] T-010 Nuitka portable build via build_windows.ps1 | owner: opencode | claim_time: 2026-08-13T06:38:10Z | verify: dist/SAIPLAN/SAIPLAN.exe exists and launches with SAIPLAN_AUTOQUIT_MS -> exit 0 (requires MSVC build tools)
 
 ## TODO
-- [ ] T-010 Nuitka portable build via build_windows.ps1 | verify: dist/SAIPLAN/SAIPLAN.exe exists and launches with SAIPLAN_AUTOQUIT_MS -> exit 0 (requires MSVC build tools)
 - [ ] T-011 Real on-screen launch + manual polish pass of the §24 definition-of-done checklist | verify: MANUAL -- human launches SAIPLAN.exe, walks TODO->DOING->DONE, switches all 16 themes
 
 ## DONE
-- [x] T-008 Version-control the project: git init, .gitignore sweep, first commit of the whole SAIPLAN tree | owner: opencode | verify: git log -1 -> e92bb9a initial commit covering src/tests/docs/themes/sounds/.saipen; git status --porcelain clean
+- [x] T-009 AI boundary interface: PlanProposal dataclass + structural validator in core (spec §16 "prepare interfaces, no provider soup"); provider adapters produce it, human accepts, tickets enter TODO | verify: tests/test_ai_boundary.py -> 9 passed; full suite 159 passed; committed 69c9ebb
+- [x] T-008 Version-control the project: git init, .gitignore sweep, first commit of the whole SAIPLAN tree | verify: git log -1 -> e92bb9a initial commit covering src/tests/docs/themes/sounds/.saipen; git status --porcelain clean
 - [x] T-012 Hotkey resolution defect: Latin letters must map to fixed virtual keys (VkKeyScanW returns -1 for a/k/K on non-Latin layouts, e.g. RU 0x0419); symbols stay layout-aware | verify: tests/test_platform.py asserts fixed VK for Ctrl+K / Ctrl+Shift+K and only the contract for symbols; full suite pytest -q -> 150 passed
 - [x] T-001 Audit four repos (FastPrompter/SAIPENVIEW/SAIPEN/Wintage) against HEAD, write docs/REFERENCE_AUDIT.md compact matrix | verify: matrix row per mechanism; 414 wav + 16 theme JSONs byte-identical to sources (verified by hash diff)
 - [x] T-002 Core data layer: model, strict BOARD parser/writer, atomic persistence (temp+fsync+replace), validated snapshots, mirror, recovery, persisted undo/redo, trash, lifecycle transitions, semantic LOG, Plan Review, search | verify: pytest -q -> 150 passed

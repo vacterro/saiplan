@@ -21,7 +21,7 @@ python -m nuitka `
   --assume-yes-for-downloads `
   --include-package=saiplan `
   --output-dir=build `
-  src\saiplan\main.py
+  main.py
 if ($LASTEXITCODE -ne 0) { throw "nuitka compile failed" }
 
 $Dist = "dist\SAIPLAN"
@@ -29,6 +29,9 @@ Write-Host "== assembling portable folder: $Dist =="
 New-Item -ItemType Directory -Force -Path "$Dist\data\plans" | Out-Null
 New-Item -ItemType Directory -Force -Path "$Dist\logs" | Out-Null
 Copy-Item -Force -Recurse build\main.dist\* $Dist
+if (Test-Path "$Dist\main.exe") {
+  Rename-Item -Force "$Dist\main.exe" "SAIPLAN.exe"
+}
 Copy-Item -Force -Recurse themes $Dist
 Copy-Item -Force -Recurse sounds $Dist
 if (-not (Test-Path "$Dist\SAIPLAN.exe")) {

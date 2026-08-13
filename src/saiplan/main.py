@@ -13,9 +13,9 @@ import os
 import sys
 import time
 
+from .applog import setup_logging
 from .core.config import Config
 from .extras.timers import TimerEngine
-from .logging import setup_logging
 from .platform import paths
 from .platform.single_instance import (
     SingleInstanceMutex,

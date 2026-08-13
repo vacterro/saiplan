@@ -113,7 +113,7 @@ def test_parse_hotkey_bad_spec():
 
 
 def test_crash_log_written(tmp_path):
-    from saiplan.logging import setup_logging
+    from saiplan.applog import setup_logging
 
     logger = setup_logging(tmp_path)
     assert (tmp_path / "saiplan.log").exists()

@@ -13,3 +13,10 @@
 - 13.08.26 06:33 [E-012] [parent: E-011] [T-009] RUN: SCOUT -- T-009 new module src/saiplan/core/proposal.py (PlanProposal + validator + apply-to-board); neighbor core/plan.py + lifecycle.py; architecture: core stays Qt-free, controller owns persistence; harness pytest -q, ruff
 - 13.08.26 06:35 [E-013] [parent: E-012] [T-009] RUN: verify -> pytest -q -> 159 passed (9 new ai_boundary tests); ruff check clean; ruff format clean
 - 13.08.26 06:36 [E-014] [parent: E-013] [T-009] DEC: SHIP
+- 13.08.26 06:38 [E-015] [parent: E-014] RUN: ship -> committed 69c9ebb; publish skipped (no origin configured)
+- 13.08.26 06:38 [E-016] [parent: E-015] [T-009] DEC: T-009 DONE -> done.md step 1: TODO remains -> next SCOUT T-010
+- 13.08.26 06:39 [E-017] [parent: E-016] [T-010] RUN: SCOUT -- no MSVC/zig/gcc on host; nuitka absent; BUT build_windows.ps1 uses --assume-yes-for-downloads (nuitka can self-provision MinGW64) -> attempting documented build path
+- 13.08.26 06:46 [E-018] [parent: E-017] [T-010] RUN: verify -> dist/SAIPLAN/SAIPLAN.exe launches with SAIPLAN_AUTOQUIT_MS=1500 -> exit 0 (log: start + rc 0); copied-folder launch (no SAIPLAN_ROOT override) -> exit 0, exe-adjacent data recreated
+- 13.08.26 06:46 [E-019] [parent: E-018] DEC: build exposed two defects fixed in T-010: saiplan/logging.py shadowed stdlib logging under Nuitka (renamed -> applog.py); entry script relative imports broke standalone __main__ (root main.py shim added; build_windows.ps1 compiles it)
+- 13.08.26 06:47 [E-020] [parent: E-019] [T-010] RUN: review -> independent launch exit 0; pytest 159 passed; ruff clean; diff: applog rename + root main.py shim + build_windows.ps1 (mechanical, no P0/P1)
+- 13.08.26 06:47 [E-021] [parent: E-020] [T-010] DEC: SHIP
