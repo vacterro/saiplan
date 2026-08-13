@@ -32,6 +32,32 @@ def test_library_no_hardcoded_count(tmp_path):
     assert lib.path_for("sub/b.wav") is not None
 
 
+def test_nested_path_resolution_platform_neutral(tmp_path):
+    """Nested paths resolve via pathlib parts on ANY OS (audit failure:
+    rel.replace('/', '\\\\') was Windows-only)."""
+    lib = SoundLibrary(tmp_path)
+    (tmp_path / "cs_style").mkdir()
+    (tmp_path / "cs_style" / "buttonclick.wav").write_bytes(b"RIFF")
+    assert lib.path_for("cs_style/buttonclick.wav") is not None
+    assert lib.path_for("cs_style/buttonclick.wav").is_file()
+
+
+def test_path_traversal_rejected(tmp_path):
+    outside = tmp_path.parent / "outside.wav"
+    outside.write_bytes(b"RIFF")
+    lib = SoundLibrary(tmp_path)
+    assert lib.path_for("../outside.wav") is None
+    assert lib.path_for("a/../../outside.wav") is None
+    assert lib.path_for("..") is None
+
+
+def test_missing_file_returns_none(tmp_path):
+    lib = SoundLibrary(tmp_path)
+    assert lib.path_for("nope.wav") is None
+    assert lib.path_for("") is None
+    assert lib.path_for("sub/nope.wav") is None
+
+
 def test_missing_sound_dir_is_empty_not_crash():
     lib = SoundLibrary(Path("V:/does/not/exist/sounds"))
     assert lib.count() == 0

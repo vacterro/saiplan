@@ -1,5 +1,6 @@
 # Build a portable SAIPLAN folder with Nuitka (Windows 10/11 x64).
-# Requires: MSVC build tools, Python 3.11+, `pip install -e .[build,dev]`
+# Requires: Python 3.11+, `pip install -e .[build,dev]`; Nuitka auto-provisions
+# its own MinGW64 toolchain via --assume-yes-for-downloads.
 #
 # Result: dist\SAIPLAN\SAIPLAN.exe + data/ + themes/ + sounds/ + logs/
 # Move/copy the whole folder to move the complete installation (I14).
@@ -42,8 +43,10 @@ Write-Host "== verify: launching headless auto-quit smoke =="
 $env:SAIPLAN_ROOT = $Dist
 $env:QT_QPA_PLATFORM = "offscreen"
 $env:SAIPLAN_AUTOQUIT_MS = "1500"
-& "$Dist\SAIPLAN.exe"
-if ($LASTEXITCODE -ne 0) { throw "built SAIPLAN.exe failed to launch (rc=$LASTEXITCODE)" }
+# GUI-subsystem exe: & returns immediately; Start-Process -Wait gives the rc
+$p = Start-Process -FilePath "$Dist\SAIPLAN.exe" -PassThru -Wait
+if ($p.ExitCode -ne 0) { throw "built SAIPLAN.exe failed to launch (rc=$($p.ExitCode))" }
+Remove-Item Env:SAIPLAN_ROOT
 
 Write-Host ""
 Write-Host "DONE: $Dist"

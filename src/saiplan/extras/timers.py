@@ -21,11 +21,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+
+from ..core.persistence import atomic_write
 
 _logger = logging.getLogger("saiplan.timers")
 
@@ -49,6 +52,19 @@ def parse_iso(value: str):
 
 def _monotonic() -> float:
     return time.monotonic()
+
+
+def _valid_repeat(value) -> bool:
+    """A repeat interval is valid only when None or a finite positive number.
+    NaN/inf/0/negative are rejected: a bad interval can move a deadline into
+    the past forever (infinite loop in tick())."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value > 0
 
 
 class TimerError(Exception):
@@ -82,11 +98,16 @@ class DeadlineTimer:
             return None
         if parse_iso(rec["target_at"]) is None:
             return None
+        repeat = rec.get("repeat_every_s")
+        if not _valid_repeat(repeat):
+            # a malformed persisted repeat is skipped safely (never a hang,
+            # never a silently wrong interval)
+            return None
         return DeadlineTimer(
             tid=rec.get("tid") or uuid.uuid4().hex[:12],
             label=rec.get("label", "timer"),
             target_at=rec["target_at"],
-            repeat_every_s=rec.get("repeat_every_s"),
+            repeat_every_s=repeat,
             snoozed_until=rec.get("snoozed_until"),
         )
 
@@ -315,8 +336,18 @@ class TicketTimer:
             if sid in closed_ids:
                 continue  # already closed; the open marker is just history
             rec = dict(rec)
+            ended = parse_iso(_now_iso())
+            started = parse_iso(rec.get("started_at"))
             rec["ended_at"] = _now_iso()
-            rec["duration_s"] = 0.0
+            # truthful recovery: the persisted wall clock is USED, not zeroed.
+            # Monotonic is unavailable across a crash, so the duration is an
+            # estimate, never a lie.
+            if started is not None:
+                rec["duration_s"] = round(max(0.0, (ended or 0.0) - started), 2)
+                rec["duration_source"] = "wall_clock_estimate"
+            else:
+                rec["duration_s"] = 0.0
+                rec["duration_source"] = "unknown"
             rec["recovered"] = True
             self._append(rec)
             sessions.append(rec)
@@ -374,14 +405,18 @@ class TimerEngine:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         body = "".join(json.dumps(t.to_record()) + "\n" for t in self.deadline.values())
-        with open(self.path, "w", encoding="utf-8") as fh:
-            fh.write(body)
+        atomic_write(self.path, body)
 
     def add_deadline(
         self, target_iso: str, label: str = "timer", repeat_every_s: float | None = None
     ) -> DeadlineTimer:
         if parse_iso(target_iso) is None:
             raise TimerError(f"bad target timestamp {target_iso!r}")
+        if not _valid_repeat(repeat_every_s):
+            raise TimerError(
+                f"repeat interval {repeat_every_s!r} is invalid; "
+                "must be a finite positive number or None"
+            )
         timer = DeadlineTimer(target_at=target_iso, label=label, repeat_every_s=repeat_every_s)
         self.deadline[timer.tid] = timer
         self.save()
@@ -413,10 +448,11 @@ class TimerEngine:
             if now >= target and tid not in self._fired:
                 self._fired.add(tid)
                 fired.append(timer)
-                if timer.repeat_every_s:
-                    next_target = target + timer.repeat_every_s
+                if timer.repeat_every_s and _valid_repeat(timer.repeat_every_s):
+                    interval = float(timer.repeat_every_s)
+                    next_target = target + interval
                     while next_target <= now:
-                        next_target += timer.repeat_every_s
+                        next_target += interval
                     timer.target_at = datetime.fromtimestamp(next_target, tz=UTC).strftime(
                         "%Y-%m-%dT%H:%M:%SZ"
                     )

@@ -10,6 +10,9 @@ from saiplan.platform import paths
 from saiplan.platform.hotkeys import MOD_ALT, MOD_CONTROL, MOD_SHIFT, parse_hotkey, vk_scan
 from saiplan.platform.single_instance import SingleInstanceMutex, new_token
 
+IS_WIN32 = sys.platform == "win32"
+win32_only = pytest.mark.skipif(not IS_WIN32, reason="Windows named mutex semantics")
+
 
 def test_layout_under_given_root():
     layout = paths.resolve_layout(Path("X:/somewhere/SAIPLAN"))
@@ -63,7 +66,11 @@ def test_dir_writable(tmp_path):
     assert paths.dir_writable(blocker) is False
 
 
+@win32_only
 def test_mutex_first_and_second(tmp_path):
+    """Win32-only: the named mutex is real kernel state. On non-Windows the
+    class is a no-op that always reports first — asserting on it would be
+    testing nothing."""
     name = "SaiplanTest"
     with SingleInstanceMutex(name) as first:
         assert first.is_first

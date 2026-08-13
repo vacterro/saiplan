@@ -29,6 +29,23 @@ def test_backlinks_found(plan):
     assert "note-a" in bl[0].name
 
 
+def test_notes_unicode_names_preserved_and_atomic(plan):
+    """Multilingual note names keep their Unicode (no collapse to 'note');
+    writes are atomic (no temp litter)."""
+    path = notes.write_note(plan, "Моя заметка / 私のメモ", "content")
+    assert path.exists()
+    assert "Моя" in path.name and "私" in path.name
+    assert notes.read_note(path) == "content"
+    assert list(plan.notes_dir.glob("*.tmp-*")) == []
+
+
+def test_note_name_collision_free(plan):
+    a = notes.write_note(plan, "Русский", "one")
+    b = notes.write_note(plan, "日本語", "two")
+    assert a != b
+    assert a.exists() and b.exists()
+
+
 def test_note_search(plan):
     notes.write_note(plan, "one", "buy the ssd now")
     notes.write_note(plan, "two", "other stuff")

@@ -9,9 +9,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from .validation import validate_theme
+
+logger = logging.getLogger("saiplan")
 
 DEFAULT_THEME = "goldenvintage"
 
@@ -81,17 +84,20 @@ class ThemeRegistry:
         return out
 
     def _try_load(self, path: Path) -> Theme | None:
+        """Load one theme file. ANY failure returns None + a log line — the
+        emergency fallback must survive a malformed theme, never crash on it."""
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
+            if validate_theme(data):
+                return None
+            theme = Theme(
+                data["slug"], data.get("label", data["slug"]), data["tokens"], data.get("source")
+            )
+            theme.order = data.get("order", 999)
+            return theme
+        except Exception as e:  # noqa: BLE001  (isolation by design, I8)
+            logger.warning("theme %s rejected: %s", path.name, e)
             return None
-        if validate_theme(data):
-            return None
-        theme = Theme(
-            data["slug"], data.get("label", data["slug"]), data["tokens"], data.get("source")
-        )
-        theme.order = data.get("order", 999)
-        return theme
 
     def get(self, slug: str | None) -> Theme:
         """Load `slug`, falling back to Golden Vintage on any failure. Only if

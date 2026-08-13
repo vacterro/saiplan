@@ -6,8 +6,12 @@ Adapted from the audited writers:
 - SAIPENVIEW `textio.write_doc` (unique temp name, mode preservation)
 - SAIPENVIEW SelfWriteRegistry / ExternalChangeRegistry (causal attribution)
 
-Data-safety contract (spec 9 / I4 / I5): a corrupt or empty new state never
-replaces a healthy backup; an external edit is never silently overwritten.
+Data-safety contract (spec 9 / I4 / I5):
+- a save is accepted ONLY when the new text is a strictly valid, losslessly
+  representable BOARD (empty or corrupt text is rejected, never silently
+  canonicalized into BOARD.md);
+- an external edit is never silently overwritten;
+- a corrupt primary is preserved byte-for-byte before recovery.
 """
 
 from __future__ import annotations
@@ -19,6 +23,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from .board import board_text_is_strictly_valid
+
 _TS = "sha256"
 
 
@@ -29,6 +35,11 @@ class ExternalEditError(RuntimeError):
 
 class CorruptBoardError(RuntimeError):
     """The board file is unreadable and no valid backup exists."""
+
+
+class BoardValidationError(ValueError):
+    """The caller tried to save text that is not a losslessly representable
+    BOARD. The save is refused before any write."""
 
 
 def file_fingerprint(path: Path) -> str:
@@ -54,17 +65,20 @@ def _probe_writable(path: Path) -> bool:
 
 def atomic_write(path: Path, text: str, *, encoding: str = "utf-8", newline: str = "\n") -> None:
     """Write `text` atomically. Raises on failure; target untouched on error."""
+    atomic_write_bytes(path, text.encode(encoding, errors="replace"), newline=newline)
+
+
+def atomic_write_bytes(path: Path, raw: bytes, *, newline: str = "\n") -> None:
+    """Write raw bytes atomically (temp + flush + fsync + os.replace)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if not _probe_writable(path):
         raise OSError(f"directory is not writable: {path.parent}")
-    if newline != "\n":
-        text = text.replace("\n", newline)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".tmp-")
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as fh:
-            fh.write(text.encode(encoding, errors="replace"))
+            fh.write(raw)
             fh.flush()
             os.fsync(fh.fileno())
         if path.exists():
@@ -82,25 +96,25 @@ def atomic_write(path: Path, text: str, *, encoding: str = "utf-8", newline: str
 
 
 def _text_is_valid(text: str) -> bool:
-    """A trustworthy board: non-empty and parses cleanly (or still yields
-    tickets). Empty text is never trusted as a recovery snapshot."""
-    if not text or not text.strip():
-        return False
-    from .board import parse_board
-
-    _board, errors = parse_board(text)
-    return not errors or any(_board.all_tickets())
+    """A board is trustworthy ONLY when it is a strictly valid canonical BOARD.
+    Any structural error (partial parse) makes it unusable as authority."""
+    return board_text_is_strictly_valid(text)
 
 
 def validate_snapshot(path: Path, minimum_non_empty: int = 1) -> bool:
-    """A snapshot is trustworthy only if it exists, is non-empty and parses."""
+    """A snapshot is trustworthy only if it exists, is non-empty and parses
+    with ZERO structural errors."""
     try:
         raw = path.read_bytes()
     except OSError:
         return False
     if len(raw) < minimum_non_empty:
         return False
-    return _text_is_valid(raw.decode("utf-8", errors="replace"))
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return _text_is_valid(text)
 
 
 class BoardStore:
@@ -138,8 +152,15 @@ class BoardStore:
 
     # -- save ---------------------------------------------------------
     def save(self, text: str, *, allow_external: bool = False, force: bool = False) -> None:
-        """Persist new board state. Refuses (ExternalEditError) when the file
-        changed externally unless explicitly allowed or bytes are identical."""
+        """Persist new board state.
+
+        Refuses (BoardValidationError) any text that is not a strictly valid
+        BOARD — an empty or partially-parsed board must never be silently
+        canonicalized into the authority. Refuses (ExternalEditError) when the
+        file changed externally unless explicitly allowed.
+        """
+        if not force and not _text_is_valid(text):
+            raise BoardValidationError("refusing to save a board that cannot be parsed losslessly")
         if not force and not allow_external and self.has_external_change():
             raise ExternalEditError(
                 "BOARD.md changed outside SAIPLAN since it was loaded; "
@@ -174,9 +195,6 @@ class BoardStore:
             except OSError:
                 pass  # mirror failure must not fail the save (spec 9)
 
-    def _validated_previous(self, previous: bytes) -> bool:
-        return bool(previous) and _text_is_valid(previous.decode("utf-8", errors="replace"))
-
     @staticmethod
     def _prune(directory: Path, pattern: str, keep: int) -> None:
         snaps = BoardStore._snapshots(directory)
@@ -198,9 +216,25 @@ class BoardStore:
         return snaps
 
     # -- recovery -----------------------------------------------------
-    def latest_snapshot(self) -> Path | None:
-        snaps = self._snapshots(self.history_dir)
-        return snaps[-1] if snaps else None
+    def preserve_corrupt(self) -> Path | None:
+        """Copy the current primary bytes to `.history/corrupt-<ts>.board.md`
+        BEFORE any recovery overwrites it. Returns the copy path, or None when
+        there is nothing to preserve (missing/empty primary)."""
+        try:
+            raw = self.board_path.read_bytes()
+        except OSError:
+            return None
+        if not raw:
+            return None
+        target = self.history_dir / (
+            f"corrupt-{time.strftime('%Y%m%d-%H%M%S')}-"
+            f"{int(time.time() * 1000) % 1000000:06d}.board.md"
+        )
+        try:
+            atomic_write_bytes(target, raw)
+        except OSError:
+            return None
+        return target
 
     def recover(self) -> str:
         """Load latest VALIDATED snapshot text, or raise CorruptBoardError."""
@@ -215,3 +249,24 @@ class BoardStore:
             if validate_snapshot(candidate):
                 return text
         raise CorruptBoardError("BOARD.md is corrupt and no valid snapshot exists")
+
+    def recover_and_adopt(self) -> str:
+        """Restore the latest VALIDATED snapshot over the corrupt primary and
+        adopt it as the loaded state.
+
+        Order:
+        1. preserve the corrupt primary bytes to `.history/corrupt-<ts>.md`
+        2. pick the newest valid snapshot (validated, strict)
+        3. atomically write it to BOARD.md
+        4. set loaded_text + guard to the restored bytes
+
+        After this call, disk / loaded_text / guard describe the SAME state.
+        Raises CorruptBoardError when no valid snapshot exists (nothing is
+        written in that case — the corrupt primary stays untouched).
+        """
+        self.preserve_corrupt()
+        text = self.recover()
+        atomic_write(self.board_path, text)
+        self.loaded_text = text
+        self.guard = file_fingerprint(self.board_path)
+        return text

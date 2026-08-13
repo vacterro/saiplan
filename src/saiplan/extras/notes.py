@@ -1,20 +1,34 @@
 """Per-plan notes + backlinks (extras, spec 7). Planner-relevant only:
 plain markdown files beside the data, `[[S-001]]` links between tickets and
 notes. No vault, no graph, no plugin system.
+
+Note filenames keep Unicode (multilingual) but strip only path-unsafe
+characters; writes are atomic. A human's note is data, not scratch.
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
+from ..core.persistence import atomic_write
+
 LINK_RE = re.compile(r"\[\[([ST]-\d+)\]\]")
+_PATH_UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_note_name(name: str) -> str:
+    """Unicode-preserving filesystem-safe note stem."""
+    name = unicodedata.normalize("NFC", name or "").strip()
+    name = _PATH_UNSAFE.sub("_", name)
+    name = re.sub(r"\s+", " ", name).strip(" ._")
+    return name or "note"
 
 
 def note_path(plan, name: str) -> Path:
     """Resolve a note name to a file under the plan's notes/ dir."""
-    safe = re.sub(r"[^A-Za-z0-9_.\- ]+", "", name).strip() or "note"
-    return plan.notes_dir / f"{safe}.md"
+    return plan.notes_dir / f"{safe_note_name(name)}.md"
 
 
 def list_notes(plan) -> list[Path]:
@@ -31,7 +45,7 @@ def read_note(path: Path) -> str:
 def write_note(plan, name: str, text: str) -> Path:
     plan.ensure_dirs()
     path = note_path(plan, name)
-    path.write_text(text, encoding="utf-8")
+    atomic_write(path, text)
     return path
 
 

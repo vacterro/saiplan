@@ -32,6 +32,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..extras.timers import parse_iso
+
 
 class PlanDialog(QDialog):
     """First-run: name + objective. No wizard maze."""
@@ -325,7 +327,7 @@ class TimerPanel(QDialog):
         self.pomo_pause = QPushButton("Pause")
         self.pomo_skip = QPushButton("Skip")
         self.pomo_start.clicked.connect(self.engine.pomodoro.start_work)
-        self.pomo_pause.clicked.connect(self.engine.pomodoro.pause)
+        self.pomo_pause.clicked.connect(self._pomo_toggle)
         self.pomo_skip.clicked.connect(self.engine.pomodoro.skip)
         row.addWidget(self.pomo_start)
         row.addWidget(self.pomo_pause)
@@ -351,7 +353,16 @@ class TimerPanel(QDialog):
         layout.addLayout(row)
         self.count_label = QLabel("")
         layout.addWidget(self.count_label)
-        layout.addStretch(1)
+        self.deadline_list = QListWidget()
+        layout.addWidget(self.deadline_list, 1)
+        buttons = QHBoxLayout()
+        self.deadline_cancel = QPushButton("Cancel selected")
+        self.deadline_snooze = QPushButton("Snooze 5 min")
+        self.deadline_cancel.clicked.connect(self._deadline_cancel)
+        self.deadline_snooze.clicked.connect(self._deadline_snooze)
+        buttons.addWidget(self.deadline_cancel)
+        buttons.addWidget(self.deadline_snooze)
+        layout.addLayout(buttons)
         return w
 
     def _build_ticket(self) -> QWidget:
@@ -372,6 +383,15 @@ class TimerPanel(QDialog):
         else:
             self.engine.stopwatch.resume()
 
+    def _pomo_toggle(self):
+        p = self.engine.pomodoro
+        if p._paused_at is not None:
+            p.resume()
+        elif p.running:
+            p.pause()
+        else:
+            p.start_work()
+
     def _countdown_start(self):
         mins = self.count_spin.value()
         from datetime import datetime
@@ -380,7 +400,21 @@ class TimerPanel(QDialog):
             "%Y-%m-%dT%H:%M:%SZ"
         )
         self.engine.add_deadline(target, label=f"countdown {mins} min")
-        self._tick_active = mins
+        self.count_label.setText("active")
+
+    def _deadline_cancel(self):
+        item = self.deadline_list.currentItem()
+        if item is not None:
+            tid = item.data(Qt.ItemDataRole.UserRole)
+            if tid:
+                self.engine.cancel(tid)
+
+    def _deadline_snooze(self):
+        item = self.deadline_list.currentItem()
+        if item is not None:
+            tid = item.data(Qt.ItemDataRole.UserRole)
+            if tid:
+                self.engine.snooze(tid, 300)
 
     def _ticket_stop(self):
         item = self.ticket_list.currentItem()
@@ -398,23 +432,42 @@ class TimerPanel(QDialog):
         if p.phase == "idle":
             self.pomo_label.setText("idle")
             self.pomo_pause.setEnabled(False)
+            self.pomo_pause.setText("Pause")
         else:
             self.pomo_label.setText(f"{p.phase}  {self._fmt(p.phase_remaining())}")
             self.pomo_pause.setEnabled(True)
+            self.pomo_pause.setText("Resume" if p._paused_at is not None else "Pause")
+        # active deadlines with live remaining time + cancel/snooze
+        self.deadline_list.clear()
+        now = time.time()
+        for timer in self.engine.deadline.values():
+            remaining = parse_iso(timer.target_at) - now
+            text = (
+                f"{timer.label}  {self._fmt(remaining)}" if remaining is not None else timer.label
+            )
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, timer.tid)
+            self.deadline_list.addItem(item)
+        if self.deadline_list.count():
+            self.count_label.setText(f"{self.deadline_list.count()} active")
+        else:
+            self.count_label.setText("no active countdowns")
         self.ticket_list.clear()
-        if self.engine.ticket_timer:
-            for tid in self.engine.ticket_timer.running():
-                item = QListWidgetItem(f"{tid}  since {self.engine.ticket_timer.started_at(tid)}")
+        tt = getattr(self.engine, "ticket_timer", None)
+        if tt is not None:
+            for tid in tt.running():
+                item = QListWidgetItem(f"{tid}  since {tt.started_at(tid)}")
                 item.setData(Qt.ItemDataRole.UserRole, tid)
                 self.ticket_list.addItem(item)
 
     @staticmethod
     def _fmt(seconds: float, ms: bool = False) -> str:
-        seconds = max(0, int(seconds))
-        h, rem = divmod(seconds, 3600)
+        seconds = max(0.0, float(seconds))
+        whole = int(seconds)
+        h, rem = divmod(whole, 3600)
         m, s = divmod(rem, 60)
         if ms:
-            tenth = int(seconds * 10) % 10
+            tenth = int((seconds - whole) * 10)
             return f"{h:02d}:{m:02d}:{s:02d}.{tenth}"
         return f"{h:02d}:{m:02d}:{s:02d}"
 

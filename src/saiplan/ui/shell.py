@@ -31,7 +31,7 @@ from ..core.model import BLOCKED, DOING, DONE, TODO
 from ..core.persistence import BoardStore
 from ..core.plan import PlanStore
 from ..extras.sounds import SoundLibrary, SoundPlayer, SoundRegistry
-from ..extras.timers import TicketTimer, TimerEngine
+from ..extras.timers import TicketTimer
 from ..theme.loader import build_qss
 from ..theme.registry import ThemeRegistry
 from .board import BoardView
@@ -54,11 +54,13 @@ class App:
     """Application wiring shared by shell and dialogs."""
 
     def __init__(
-        self, layout: dict, config: Config, theme_registry: ThemeRegistry, timer_engine: TimerEngine
+        self, layout: dict, config: Config, theme_registry: ThemeRegistry | None, timer_engine
     ):
         self.layout = layout
         self.config = config
-        self.theme_registry = theme_registry
+        # I8: a failed registry construction must never leave None downstream;
+        # normalize to a real registry that falls back to the emergency theme
+        self.theme_registry = theme_registry or ThemeRegistry(layout["themes"])
         self.plan_store = PlanStore(layout["plans"])
         self.sound_library = SoundLibrary(layout["sounds"])
         self.sound_registry = SoundRegistry(self.sound_library, config.get("sound_events") or {})
@@ -120,6 +122,8 @@ class MainWindow(QMainWindow):
         self.board_view.ticket_dropped.connect(self._on_drop)
         self.board_view.ticket_activated.connect(self._on_activate)
         self.board_view.ticket_selected.connect(self._on_tickets_selected)
+        self.board_view.mutation_succeeded.connect(self._after_mutation)
+        self.board_view.quick_add_failed.connect(lambda message: self.status.showMessage(message))
 
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search (Ctrl+F)...")
@@ -145,7 +149,7 @@ class MainWindow(QMainWindow):
             on_timer_toggle=self._toggle_ticket_timer,
             on_notes=self._open_notes,
         )
-        self.inspector.board_changed.connect(self._refresh)
+        self.inspector.board_changed.connect(self._after_mutation)
         self.inspector_dock = QDockWidget("Ticket", self)
         self.inspector_dock.setObjectName("inspectorDock")
         self.inspector_dock.setWidget(self.inspector)
@@ -256,13 +260,8 @@ class MainWindow(QMainWindow):
             return
         name, ok = QInputDialog.getText(self, "Rename plan", "Name", text=plan.name)
         if ok and name.strip():
-            from ..core.persistence import atomic_write
-
-            plan.name = name.strip()
-            atomic_write(
-                plan.plan_md_path,
-                f"# {plan.name}\n\ncreated: {plan.created}\n\n## Objective\n{plan.objective}\n",
-            )
+            # surgical update: keeps Objective/Constraints/DoD + unknown sections
+            plan.update_plan_doc(name=name.strip())
             self._load_plans()
 
     def _new_plan(self):
@@ -290,8 +289,37 @@ class MainWindow(QMainWindow):
         )
         if resp != QMessageBox.StandardButton.Yes:
             return
+        # if the archived plan is the one the controller is using, detach it
+        # cleanly first so a later mutation cannot recreate its old directory
+        controller = self.app.controller
+        if controller is not None and controller.plan.plan_id == plan_id:
+            self._detach_active_plan()
+        recent = list(self.app.config.get("recent_plans") or [])
+        pinned = list(self.app.config.get("pinned_plans") or [])
+        for lst in (recent, pinned):
+            if plan_id in lst:
+                lst.remove(plan_id)
+        self.app.config.set("recent_plans", recent)
+        self.app.config.set("pinned_plans", pinned)
+        self.app.config.save()
         if archive_plan(self.app.layout["plans"], plan_id) is not None:
             self._load_plans()
+            self._open_initial()
+
+    def _detach_active_plan(self):
+        """Stop ticket timers and drop the controller before archiving the
+        active plan."""
+        if self.app.ticket_timer is not None:
+            for tid in self.app.ticket_timer.running():
+                self.app.ticket_timer.stop_ticket(tid)
+        self.app.controller = None
+        self.app.ticket_timer = None
+        self.board_view.controller = None
+        self.inspector.controller = None
+        self._conflict_shown = False
+        self.conflict_banner.hide()
+        self.setWindowTitle("SAIPLAN")
+        self.status.showMessage("Plan archived")
 
     def _open_initial(self):
         plans = self.app.plan_store.list_plans()
@@ -396,9 +424,25 @@ class MainWindow(QMainWindow):
                 return
         try:
             controller.transition(ticket_id, target, reason)
-            self._on_board_mutated()
+            self._after_mutation()
         except ControllerError as e:
             QMessageBox.warning(self, "SAIPLAN", str(e))
+
+    def _after_mutation(self):
+        """Refresh the board and map the last committed semantic event to an
+        optional sound. Core never depends on sound — this is the UI adapter."""
+        self._refresh()
+        controller = self.app.controller
+        if controller is None:
+            return
+        event = controller.last_event
+        if event == "TICKET_DONE":
+            self._play("ticket_done")
+        elif event == "TICKET_BLOCKED":
+            self._play("blocked_warning")
+        if event and self._plan_just_completed(controller):
+            self._play("plan_completed")
+        controller.last_event = None
 
     def _on_selected_action(self, target: str):
         controller = self.app.controller
@@ -443,10 +487,16 @@ class MainWindow(QMainWindow):
         self.inspector.set_ticket(ticket)
 
     def _on_board_mutated(self):
-        self._refresh()
-        if self.app.controller and self.app.controller.board.get:
-            # play a sound only when a ticket reached DONE through the UI
-            pass
+        """Legacy alias: every mutation path funnels through _after_mutation."""
+        self._after_mutation()
+
+    @staticmethod
+    def _plan_just_completed(controller) -> bool:
+        """True when no open tickets remain and at least one is DONE."""
+        counts = controller.board.counts()
+        return (
+            counts[TODO] == 0 and counts[DOING] == 0 and counts[BLOCKED] == 0 and counts[DONE] > 0
+        )
 
     def _undo(self):
         if self.app.controller and self.app.controller.undo():
@@ -495,31 +545,64 @@ class MainWindow(QMainWindow):
         dialog = BreakDownDialog(self)
         if dialog.exec() != BreakDownDialog.DialogCode.Accepted:
             return
-        plan = dialog.plan()
-        if not plan["tasks"]:
+        data = dialog.plan()
+        if not data["tasks"]:
             return
-        controller = self.app.controller
-        created = []
-        for line in plan["tasks"]:
+        from ..core.proposal import PlanProposal, TaskProposal
+
+        tasks = []
+        for line in data["tasks"]:
             title, _, opts = line.partition("::")
             title = title.strip()
             if not title:
                 continue
-            fields = []
+            task = TaskProposal(title=title)
             for opt in [o for o in opts.split("::")]:
                 key, _, value = opt.strip().partition("=")
-                if (
-                    key.strip() in ("needs", "priority", "due", "estimate", "done-when", "tags")
-                    and value.strip()
-                ):
-                    fields.append((key.strip(), value.strip()))
-            try:
-                ticket = controller.create_ticket(title, fields=fields)
-                created.append(ticket.ticket_id)
-            except ControllerError:
-                continue
-        self._refresh()
-        self.status.showMessage(f"Broken down into {len(created)} ticket(s): {', '.join(created)}")
+                key, value = key.strip(), value.strip()
+                if key == "needs":
+                    task.needs = [n.strip() for n in value.split(",") if n.strip()]
+                elif key == "priority":
+                    task.priority = value
+                elif key == "due":
+                    task.due = value
+                elif key == "done-when":
+                    task.done_when = value
+            tasks.append(task)
+        proposal = PlanProposal(
+            goal=data["goal"] or "Plan",
+            constraints=data["constraints"],
+            definition_of_done=data["dod"],
+            tasks=tasks,
+        )
+        controller = self.app.controller
+        # validate ALL before showing a preview — never partial creation
+        from ..core.proposal import validate_proposal
+
+        problems = validate_proposal(proposal)
+        if problems:
+            ReviewDialog([("warn", "", m) for m in problems], self).exec()
+            return
+        # preview before commit
+        preview = "\n".join(
+            f"  - {t.title}" + (f"  (needs {', '.join(t.needs)})" if t.needs else "")
+            for t in proposal.tasks
+        )
+        ok = QMessageBox.question(
+            self,
+            "SAIPLAN",
+            f"Create {len(proposal.tasks)} ticket(s) in TODO?\n\n{preview}",
+        )
+        if ok != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            created = controller.accept_proposal(proposal)
+        except ControllerError as e:
+            QMessageBox.warning(self, "SAIPLAN", str(e))
+            return
+        self._after_mutation()
+        ids = ", ".join(t.ticket_id for t in created)
+        self.status.showMessage(f"Broken down into {len(created)} ticket(s): {ids}")
 
     def _plan_review(self):
         if self.app.controller is None:
@@ -559,9 +642,11 @@ class MainWindow(QMainWindow):
             self.app.config.set(key, value)
         self.app.config.save()
         self._apply_theme()
-        if self.app.config.get("always_on_top"):
-            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-            self.show()
+        # always-on-top must be applied in BOTH directions, not just True
+        self.setWindowFlag(
+            Qt.WindowType.WindowStaysOnTopHint, bool(self.app.config.get("always_on_top", False))
+        )
+        self.show()
         # mirror setting takes effect on next plan open
         self.status.showMessage("Settings saved (mirror applies on next plan open)")
 
@@ -595,6 +680,8 @@ class MainWindow(QMainWindow):
                 self._conflict_shown = True
                 self.conflict_banner.show()
         else:
+            # conflict resolved or never happened: re-arm for the next one
+            self._conflict_shown = False
             self.conflict_banner.hide()
 
     def _resolve_conflict(self):
@@ -604,19 +691,28 @@ class MainWindow(QMainWindow):
         self.conflict_banner.hide()
         dialog = ConflictDialog(self)
         choice = dialog.exec()
-        if choice == 1:  # reload external
-            controller.reload_from_disk()
+        if choice == 1:  # reload external (local preserved in a conflict copy)
+            try:
+                path = controller.resolve_reload_external()
+            except ControllerError as e:
+                QMessageBox.warning(self, "SAIPLAN", str(e))
+                self._conflict_shown = False
+                return
             self._refresh()
-        elif choice == 2:  # keep mine: conflict copy + force save
-            path = controller.make_conflict_copy()
             if path:
-                from ..core.board import render_board
-
-                controller._apply_external(render_board(controller.board))
-                self._refresh()
-                self.status.showMessage(f"Conflict copy saved: {path}")
-            else:
-                QMessageBox.warning(self, "SAIPLAN", "Could not write conflict copy")
+                self.status.showMessage(f"Reloaded external; local preserved in {path}")
+        elif choice == 2:  # keep mine (external preserved in a conflict copy)
+            try:
+                path = controller.resolve_keep_mine()
+            except ControllerError as e:
+                QMessageBox.warning(self, "SAIPLAN", str(e))
+                self._conflict_shown = False
+                return
+            self._refresh()
+            if path:
+                self.status.showMessage(f"Kept local; external preserved in {path}")
+        # a resolved conflict must re-arm the detector for the next one
+        self._conflict_shown = False
 
     # -- timer engine --------------------------------------------------
     def _tick(self):

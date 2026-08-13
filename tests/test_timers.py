@@ -2,6 +2,7 @@
 restart recovery, idempotent completion, sleep/wake, missing sound isolation.
 """
 
+import json
 import time
 from datetime import UTC
 
@@ -218,6 +219,104 @@ def test_deadline_bad_target_refused(tmp_path):
     engine = TimerEngine(tmp_path / "t.jsonl")
     with pytest.raises(TimerError):
         engine.add_deadline("not-a-timestamp")
+
+
+@pytest.mark.parametrize("bad", [0, -5, float("nan"), float("inf"), -float("inf"), True, "10"])
+def test_repeat_invalid_rejected(tmp_path, bad):
+    engine = TimerEngine(tmp_path / "t.jsonl")
+    with pytest.raises(TimerError):
+        engine.add_deadline(_iso(60), label="x", repeat_every_s=bad)
+
+
+def test_repeat_zero_is_explicit_one_shot(tmp_path):
+    engine = TimerEngine(tmp_path / "t.jsonl")
+    with pytest.raises(TimerError):
+        engine.add_deadline(_iso(60), label="x", repeat_every_s=0)
+
+
+def test_malformed_persisted_repeat_skipped(tmp_path):
+    """A corrupt persisted repeat must be skipped safely, never a hang."""
+    p = tmp_path / "t.jsonl"
+    good = _iso(60)
+    p.write_text(
+        json.dumps(
+            {
+                "kind": "deadline",
+                "tid": "a",
+                "label": "bad",
+                "target_at": good,
+                "repeat_every_s": -1,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "kind": "deadline",
+                "tid": "b",
+                "label": "bad2",
+                "target_at": good,
+                "repeat_every_s": 0,
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {"kind": "deadline", "tid": "c", "label": "ok", "target_at": good, "repeat_every_s": 10}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    engine = TimerEngine(p)
+    assert "b" not in engine.deadline  # invalid repeats dropped
+    assert "c" in engine.deadline
+    # tick cannot hang on any loaded timer
+    fired = engine.tick(now=time.time() + 3600)
+    assert len(fired) == 1
+
+
+def test_timer_save_is_atomic(tmp_path):
+    p = tmp_path / "t.jsonl"
+    engine = TimerEngine(p)
+    engine.add_deadline(_iso(60), label="a")
+    engine.add_deadline(_iso(120), label="b")
+    engine.save()
+    # no temp litter, file is coherent JSONL
+    assert list(tmp_path.glob("*.tmp-*")) == []
+    lines = p.read_text(encoding="utf-8").splitlines()
+    assert len([l for l in lines if l.strip()]) == 2
+
+
+def test_stopwatch_fractional_display():
+    from saiplan.ui.dialogs import TimerPanel
+
+    # 65.4s -> 00:01:05.4 (fraction preserved, not .0)
+    assert TimerPanel._fmt(65.4, ms=True) == "00:01:05.4"
+    assert TimerPanel._fmt(1.5, ms=True) == "00:00:01.5"
+    assert TimerPanel._fmt(0.0, ms=True) == "00:00:00.0"
+    # 65.4s without ms -> whole seconds only
+    assert TimerPanel._fmt(65.4) == "00:01:05"
+
+
+def test_ticket_timer_recovery_uses_wall_clock(tmp_path):
+    """A crashed session's duration is estimated from the persisted wall clock,
+    never silently zeroed."""
+    from datetime import datetime, timedelta
+
+    p = tmp_path / "TIMELOG.jsonl"
+    tt = TicketTimer(p)
+    tt.start("S-100")
+    # simulate a crash 10 minutes later: rewrite the open marker's started_at
+    lines = p.read_text(encoding="utf-8").splitlines()
+    rec = json.loads(lines[-1])
+    started = datetime.fromisoformat(rec["started_at"])  # 3.11 handles 'Z'
+    rec["started_at"] = (started - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines[-1] = json.dumps(rec)
+    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tt2 = TicketTimer(p)
+    sessions = tt2.load()
+    recovered = [s for s in sessions if s.get("recovered")]
+    assert len(recovered) == 1
+    assert recovered[0]["duration_s"] > 500  # ~10 minutes, not zero
+    assert recovered[0]["duration_source"] == "wall_clock_estimate"
 
 
 def test_missing_sound_does_not_break_timer(tmp_path):

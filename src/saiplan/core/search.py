@@ -1,5 +1,9 @@
-"""Debounced in-memory search over a board + plan notes (spec 20: event-driven,
-no busy loops)."""
+"""Debounced in-memory search over a board (spec 20: event-driven, no busy
+loops).
+
+Truth: this indexes the BOARD only. Plan notes are searched separately by
+`extras.notes.note_search`; the two are not merged in v0.1.x.
+"""
 
 from __future__ import annotations
 

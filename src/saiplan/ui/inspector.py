@@ -28,7 +28,6 @@ from PyQt6.QtWidgets import (
 from ..core.model import BLOCKED, DOING, DONE, TODO, Ticket
 
 SINGLE_LINE_FIELDS = (
-    ("priority", "priority", "Priority"),
     ("due", "due", "Due"),
     ("tags", "tags", "Tags"),
     ("estimate", "estimate", "Estimate"),
@@ -233,7 +232,13 @@ class Inspector(QWidget):
     def _save_priority(self) -> None:
         if self._busy or not self.ticket_id:
             return
-        self._save_field("priority", self.priority_combo)
+        try:
+            self.controller.edit_field(
+                self.ticket_id, "priority", self.priority_combo.currentText()
+            )
+            self.board_changed.emit()
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self, "SAIPLAN", str(e))
 
     def _save_details(self) -> None:
         if self._busy or not self.ticket_id:
@@ -251,7 +256,7 @@ class Inspector(QWidget):
             item = self.checklist.item(i)
             text = item.text()[2:]  # strip ☐/☑ marker
             out.append({"text": text, "done": bool(item.data(Qt.ItemDataRole.UserRole))})
-        return json.dumps(out)
+        return json.dumps(out, ensure_ascii=False)
 
     def _add_check(self) -> None:
         text = self.check_input.text().strip()
@@ -292,6 +297,7 @@ class Inspector(QWidget):
                 return
         try:
             self.controller.transition(self.ticket_id, target, reason)
+            self.board_changed.emit()  # refresh board columns + status counts
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "SAIPLAN", str(e))
 
@@ -308,8 +314,13 @@ class Inspector(QWidget):
             f"You can restore it later from the Trash dialog.",
         )
         if resp == QMessageBox.StandardButton.Yes:
-            self.controller.delete_ticket(self.ticket_id)
+            try:
+                self.controller.delete_ticket(self.ticket_id)
+            except Exception as e:  # noqa: BLE001
+                QMessageBox.warning(self, "SAIPLAN", str(e))
+                return
             self.set_ticket(None)
+            self.board_changed.emit()  # refresh board columns after deletion
 
     def _toggle_timer(self) -> None:
         if self.ticket_id and self.on_timer_toggle:

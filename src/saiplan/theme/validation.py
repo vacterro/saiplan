@@ -7,10 +7,15 @@ see docs/REFERENCE_AUDIT.md):
 - WCAG AA >= 4.5:1 for textPrimary / textSecondary / link vs backgroundSoft
 - pack rules: slug lowercase alnum, filename == slug, unique slug/label,
   no apostrophe in label
+
+HARD RULE: `validate_theme(any JSON value) -> list[str]` MUST never raise.
+The emergency fallback depends on validation being unable to crash on
+arbitrary input (a token that is an int, a list, null, missing, broken hex…).
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 REQUIRED_TOKENS = frozenset(
@@ -44,6 +49,16 @@ WCAG_ROLES = ("textPrimary", "textSecondary", "link")
 HEX_RE = "^#[0-9a-fA-F]{6}$"
 
 
+def _is_hex_colour(value) -> bool:
+    if not isinstance(value, str) or len(value) != 7 or value[0] != "#":
+        return False
+    try:
+        int(value[1:], 16)
+        return True
+    except ValueError:
+        return False
+
+
 def hex_to_rgb(value: str) -> tuple[int, int, int]:
     value = value.lstrip("#")
     return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4))
@@ -64,8 +79,11 @@ def contrast_ratio(a: str, b: str) -> float:
     return (hi + 0.05) / (lo + 0.05)
 
 
-def validate_theme(data: dict) -> list[str]:
-    """Return a list of problems. Empty list == valid theme."""
+def validate_theme(data) -> list[str]:
+    """Return a list of problems. Empty list == valid theme.
+
+    Accepts ANY JSON-decoded value; never raises. Only hex-validated tokens
+    reach the WCAG contrast computation."""
     problems: list[str] = []
     if not isinstance(data, dict):
         return ["theme is not a JSON object"]
@@ -95,18 +113,16 @@ def validate_theme(data: dict) -> list[str]:
 
     for key in REQUIRED_TOKENS:
         value = tokens.get(key)
-        if not isinstance(value, str) or len(value) != 7 or value[0] != "#":
+        if not _is_hex_colour(value):
             problems.append(f"token {key} is not #rrggbb: {value!r}")
-            continue
-        try:
-            int(value[1:], 16)
-        except ValueError:
-            problems.append(f"token {key} is not a hex colour: {value!r}")
 
-    for role in WCAG_ROLES:
-        fg = tokens.get(role)
-        bg = tokens.get("backgroundSoft")
-        if fg and bg and "#" in fg and "#" in bg:
+    # WCAG gate only for tokens that passed strict hex validation
+    bg = tokens.get("backgroundSoft")
+    if _is_hex_colour(bg):
+        for role in WCAG_ROLES:
+            fg = tokens.get(role)
+            if not _is_hex_colour(fg):
+                continue
             ratio = contrast_ratio(fg, bg)
             if ratio < 4.5:
                 problems.append(
@@ -117,15 +133,13 @@ def validate_theme(data: dict) -> list[str]:
 
 
 def validate_theme_file(path: Path) -> list[str]:
-    """Validate one themes/*.json file, including filename==slug."""
-    import json
-
+    """Validate one themes/*.json file, including filename==slug. Never raises."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
         return [f"cannot read theme file: {e}"]
     problems = validate_theme(data)
-    if path.stem != data.get("slug"):
+    if isinstance(data, dict) and path.stem != data.get("slug"):
         problems.append(f"filename {path.name!r} must equal slug {data.get('slug')!r}")
     return problems
 

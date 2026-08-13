@@ -15,7 +15,8 @@ SECTION_ORDER = (DOING, TODO, DONE, BLOCKED)
 STATUS_CHECKBOX = {TODO: " ", DOING: "/", DONE: "x", BLOCKED: " "}
 
 # Human/optional fields SAIPLAN owns. `blocked-by` is required exactly under
-# BLOCKED (SAIPEN rule adapted); `created`/`updated` are stamped by the writer.
+# BLOCKED (SAIPEN rule adapted); `created`/`updated` are stamped by the writer;
+# `checklist` is a JSON list of {text, done} encoded into the single line.
 KNOWN_FIELDS = frozenset(
     {
         "created",
@@ -28,6 +29,7 @@ KNOWN_FIELDS = frozenset(
         "done-when",
         "blocked-by",
         "details",
+        "checklist",
     }
 )
 

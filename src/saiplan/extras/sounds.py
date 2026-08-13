@@ -33,7 +33,7 @@ class SoundLibrary:
     """Enumerate all shipped sound assets, dynamically."""
 
     def __init__(self, sounds_dir: Path):
-        self.sounds_dir = Path(sounds_dir)
+        self.sounds_dir = Path(sounds_dir).resolve()
 
     def all_files(self) -> list[str]:
         """Relative forward-slash names, stable order."""
@@ -48,10 +48,23 @@ class SoundLibrary:
         return len(self.all_files())
 
     def path_for(self, rel: str) -> Path | None:
-        """Resolve a relative name to a real file (or None if missing)."""
+        """Resolve a relative name to a real file (or None if missing).
+
+        Platform-neutral via PurePosixPath parts; the result MUST stay inside
+        the sounds dir — `../` escapes are rejected outright."""
         if not rel:
             return None
-        candidate = (self.sounds_dir / rel.replace("/", "\\")).resolve()
+        try:
+            from pathlib import PurePosixPath
+
+            parts = PurePosixPath(rel).parts
+            if not parts or ".." in parts:
+                return None
+            candidate = self.sounds_dir.joinpath(*parts).resolve()
+        except (ValueError, OSError):
+            return None
+        if self.sounds_dir not in candidate.parents and candidate != self.sounds_dir:
+            return None
         if candidate.is_file():
             return candidate
         return None

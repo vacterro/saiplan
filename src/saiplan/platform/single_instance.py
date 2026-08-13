@@ -1,9 +1,15 @@
-"""Single instance: Windows named mutex (authority) + token IPC handoff.
+"""Single instance: Windows named mutex (AUTHORITY) + nonce/ACK IPC handoff.
 
-Model from the audited FastPrompter: the mutex is the source of truth on
-"someone is running"; the IPC handoff exists only to tell that instance to
-show its window. A second instance that cannot reach the first exits — it
-never becomes a second writer to the same plan.
+The mutex is the only source of truth on "someone is running" (kernel-owned,
+auto-released on hard kill). A process that does NOT own the mutex MUST NOT
+become a writer to the shared BOARD — it attempts a handoff to the running
+instance and then exits either way. Handoff is convenience only, never
+authorization to run.
+
+The handoff uses a SHARED nonce rendezvous file (per app data dir, written
+by the first instance): the second instance reads the nonce, sends it over
+QLocalServer, and the first replies with an explicit ACK. Delivery is only
+reported when the ACK arrives — merely writing bytes is not success.
 """
 
 from __future__ import annotations
@@ -11,12 +17,16 @@ from __future__ import annotations
 import ctypes
 import secrets
 import sys
+from pathlib import Path
 
 ERROR_ALREADY_EXISTS = 183
 kernel32 = None
 
 if sys.platform == "win32":
     kernel32 = ctypes.windll.kernel32
+
+NONCE_FILE = ".instance-nonce"
+_ACK = b"ACK\n"
 
 
 class SingleInstanceMutex:
@@ -52,8 +62,29 @@ class SingleInstanceMutex:
 
 
 def new_token() -> str:
-    """Random token authenticating a handoff (never guessable, never stored)."""
+    """Random token authenticating a handoff (never guessable)."""
     return secrets.token_urlsafe(24)
+
+
+def write_nonce(layout: dict, nonce: str) -> None:
+    """Persist the first instance's handoff nonce into the shared app data
+    dir so a second instance can authenticate itself."""
+    from .paths import resolve_layout  # noqa: F401  (kept lazy, no cycles)
+
+    path = Path(layout["data"]) / NONCE_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # atomic: a torn nonce must never be readable as a valid one
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(nonce, encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_nonce(layout: dict) -> str | None:
+    try:
+        value = (Path(layout["data"]) / NONCE_FILE).read_text(encoding="utf-8").strip()
+        return value or None
+    except OSError:
+        return None
 
 
 def handoff_available() -> bool:
@@ -66,30 +97,38 @@ def handoff_available() -> bool:
         return False
 
 
-def notify_existing_instance(server_name: str, token: str, timeout_ms: int = 2000) -> bool:
-    """Ask the running instance (listening on `server_name`) to activate.
+def notify_existing_instance(server_name: str, layout: dict, timeout_ms: int = 600) -> bool:
+    """Send the shared nonce to the running instance and wait for its ACK.
 
-    Returns True when the handoff was delivered. Bounded by a timer so a dead
-    server never hangs the second instance.
+    Returns True ONLY when the ACK was received. Bounded by a timer so a dead
+    or rejecting server never hangs the second instance.
     """
     from PyQt6.QtCore import QEventLoop, QTimer
     from PyQt6.QtNetwork import QLocalSocket
 
+    nonce = read_nonce(layout)
+    if nonce is None:
+        return False  # first instance has not published its nonce yet
     socket = QLocalSocket()
     loop = QEventLoop()
-    delivered = [False]
+    acked = [False]
 
     def _connected():
-        socket.write(token.encode("utf-8"))
+        socket.write(nonce.encode("utf-8"))
         socket.flush()
-        delivered[0] = True
-        loop.quit()
+
+    def _ready_read():
+        data = bytes(socket.readAll())
+        if _ACK in data:
+            acked[0] = True
+            loop.quit()
 
     socket.connected.connect(_connected)
+    socket.readyRead.connect(_ready_read)
     socket.errorOccurred.connect(lambda _e: loop.quit())
     QTimer.singleShot(timeout_ms, loop.quit)
     socket.connectToServer(server_name)
     loop.exec()
     socket.abort()
     socket.deleteLater()
-    return delivered[0]
+    return acked[0]

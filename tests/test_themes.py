@@ -11,6 +11,7 @@ from saiplan.theme.validation import (
     check_shipped_themes,
     contrast_ratio,
     validate_theme,
+    validate_theme_file,
 )
 
 THEMES_DIR = Path(__file__).resolve().parents[1] / "themes"
@@ -118,3 +119,44 @@ def test_validate_theme_reports_problems():
     assert any("slug" in p for p in problems)
     assert any("apostrophe" in p for p in problems)
     assert any("missing tokens" in p for p in problems)
+
+
+def test_validate_theme_never_raises_on_arbitrary_json():
+    """Malformed themes must not crash validation or the emergency fallback."""
+
+    registry = ThemeRegistry(THEMES_DIR)
+    for value in (None, [], "str", 42, True, {"tokens": 5}, [{"tokens": {}}]):
+        assert isinstance(validate_theme(value), list)
+        # a registry load of arbitrary junk must still fall back cleanly
+        assert registry.get("goldenvintage").slug == "goldenvintage"
+
+
+def test_token_int_does_not_crash_validation(tmp_path):
+    import json as j
+
+    broken = {
+        "slug": "broken",
+        "label": "Broken",
+        "tokens": {"textPrimary": 123, "backgroundSoft": "#111111"},
+    }
+    path = tmp_path / "broken.json"
+    path.write_text(j.dumps(broken), encoding="utf-8")
+    problems = validate_theme_file(path)
+    assert any("textPrimary" in p for p in problems)
+    # registry skips it and the fallback survives
+    reg = ThemeRegistry(tmp_path)
+    assert reg.get("broken").slug == "goldenvintage"
+
+
+def test_broken_hex_does_not_crash_wcag(tmp_path):
+    import json as j
+
+    broken = {
+        "slug": "broken2",
+        "label": "Broken2",
+        "tokens": {t: "#zzzzzz" for t in REQUIRED_TOKENS},
+    }
+    path = tmp_path / "broken2.json"
+    path.write_text(j.dumps(broken), encoding="utf-8")
+    assert validate_theme_file(path)  # problems, no crash
+    assert ThemeRegistry(tmp_path).get("broken2").slug == "goldenvintage"

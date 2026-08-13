@@ -22,24 +22,30 @@ from .platform.single_instance import (
     handoff_available,
     new_token,
     notify_existing_instance,
+    write_nonce,
 )
 from .theme.registry import ThemeRegistry
 
 logger = logging.getLogger("saiplan")
 
+_ACK_BYTES = b"ACK\n"
+STARTUP_GRACE_S = 2.5
 
-def _ensure_single_instance(app_layout: dict) -> bool:
-    """Returns True when this process should run (i.e. it is the first)."""
-    mutex = SingleInstanceMutex("Saiplan")
-    if mutex.is_first:
-        return True
-    if handoff_available():
+
+def _handoff_to_first(layout: dict) -> bool:
+    """Ask the running first instance to activate its window. Returns True
+    when its ACK was received (this process should then exit)."""
+    if not handoff_available():
+        return False
+    deadline = time.monotonic() + STARTUP_GRACE_S
+    while time.monotonic() < deadline:
         try:
-            if notify_existing_instance("Saiplan", new_token()):
-                return False
+            if notify_existing_instance("Saiplan", layout, timeout_ms=600):
+                return True
         except Exception as e:  # noqa: BLE001
-            logger.warning("single-instance handoff failed: %s", e)
-    return True  # stale mutex or handoff impossible -> run (last writer wins avoided)
+            logger.warning("single-instance handoff attempt failed: %s", e)
+        time.sleep(0.15)
+    return False
 
 
 def main() -> int:
@@ -53,17 +59,30 @@ def main() -> int:
     logger = setup_logging(layout["logs"])
     logger.info("SAIPLAN starting; root=%s", layout["root"])
 
-    if not _ensure_single_instance(layout):
-        logger.info("second instance handed off; exiting")
-        return 0
-
-    from PyQt6.QtCore import QByteArray
     from PyQt6.QtNetwork import QLocalServer
     from PyQt6.QtWidgets import QApplication, QMessageBox
 
     app = QApplication(sys.argv)
     app.setApplicationName("SAIPLAN")
     app.setOrganizationName("saiplan")
+
+    # SINGLE WRITER GATE (mutex is authority): a process that does not own the
+    # mutex must NEVER become a writer to the shared BOARD. It attempts the
+    # handoff during a bounded grace window, then exits either way.
+    mutex = SingleInstanceMutex("Saiplan")
+    if not mutex.is_first:
+        activated = _handoff_to_first(layout)
+        logger.info("second instance; handoff %s; exiting", "ACK" if activated else "refused")
+        mutex.release()
+        if activated:
+            return 0
+        print(
+            "SAIPLAN is already running. A second instance is refused — "
+            "one writer per plan. Exiting.",
+            file=sys.stderr,
+        )
+        return 1
+    # mutex held: this process is the writer. It lives for the whole main().
 
     # CI/smoke hook: auto-quit after a fixed delay. Implemented as a repeating
     # watchdog so it also fires while a modal dialog's nested event loop runs
@@ -108,7 +127,8 @@ def main() -> int:
 
     app_ctx = App(layout, config, theme_registry, timer_engine)
 
-    handoff_token = new_token()
+    handoff_nonce = new_token()
+    write_nonce(layout, handoff_nonce)
     server = QLocalServer(app)
     server.removeServer("Saiplan")
     server.listen("Saiplan")
@@ -119,10 +139,14 @@ def main() -> int:
         if conn is None:
             return
         conn.waitForReadyRead(2000)
-        data = conn.readAll()
-        if data == QByteArray(handoff_token.encode()) and window is not None:
-            window.raise_()
-            window.activateWindow()
+        data = bytes(conn.readAll())
+        if data == handoff_nonce.encode():
+            conn.write(_ACK_BYTES)
+            conn.flush()
+            if window is not None:
+                window.raise_()
+                window.activateWindow()
+        conn.disconnectFromServer()
         conn.deleteLater()
 
     server.newConnection.connect(_on_connection)
@@ -132,11 +156,13 @@ def main() -> int:
     except Exception as e:
         logger.critical("window failed to build: %s", e, exc_info=True)
         QMessageBox.critical(None, "SAIPLAN", f"SAIPLAN could not start:\n{e}")
+        mutex.release()
         return 1
 
     window.show()
     rc = app.exec()
     app_ctx.timer_engine.save()
+    mutex.release()
     logger.info("SAIPLAN exit rc=%s", rc)
     return rc
 

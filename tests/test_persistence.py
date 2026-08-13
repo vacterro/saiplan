@@ -1,9 +1,13 @@
-"""Persistence: atomic write, external-edit guard, backup rotation, recovery.
+"""Persistence: atomic write, strict save contract, external-edit guard,
+backup rotation, recovery with corrupt-primary preservation.
 
-Failure-oriented (spec 9, 19): corrupt primary, corrupt temp, healthy backup
-recovery, empty never replaces healthy backup, mirror failure isolation.
+Failure-oriented (spec 9, 19): a save is accepted ONLY for a strictly valid
+BOARD; empty/corrupt/partial text is rejected before any write; a corrupt
+primary is preserved byte-for-byte before recovery; the mirror never fails a
+save and is never read back.
 """
 
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,11 +16,17 @@ from conftest import build_board
 from saiplan.core.board import render_board
 from saiplan.core.persistence import (
     BoardStore,
+    BoardValidationError,
     CorruptBoardError,
     ExternalEditError,
     atomic_write,
     file_fingerprint,
     validate_snapshot,
+)
+
+PARTIAL_BOARD = (
+    "## DOING\n## TODO\nHUMAN NOTE MUST SURVIVE\n- [ ] S-001 Good | malformed fragment\n"
+    "- [ ] S-002 Also good\n## DONE\n## BLOCKED\n"
 )
 
 
@@ -34,8 +44,6 @@ def _write_healthy_board(path: Path):
 
 
 def test_atomic_write_creates_file():
-    import tempfile
-
     with tempfile.TemporaryDirectory() as d:
         target = Path(d) / "BOARD.md"
         atomic_write(target, "## TODO\n")
@@ -69,14 +77,52 @@ def test_load_and_save_roundtrip(store):
     assert not store.has_external_change()
 
 
+def test_empty_save_rejected(store):
+    with pytest.raises(BoardValidationError):
+        store.save("")
+
+
+def test_corrupt_save_rejected(store):
+    with pytest.raises(BoardValidationError):
+        store.save("### GARBAGE not a board")
+
+
+def test_partial_board_with_human_note_rejected(store):
+    """A board with a malformed line / malformed field fragment must never be
+    silently canonicalized — the human bytes would be destroyed (I3/I4/I5)."""
+    with pytest.raises(BoardValidationError):
+        store.save(PARTIAL_BOARD)
+    # and the canonical file was never touched
+    assert not store.board_path.exists()
+
+
+def test_healthy_primary_untouched_by_rejected_saves(store):
+    healthy = render_board(build_board("TODO S-001 A", "TODO S-002 B"))
+    store.save(healthy)
+    for bad in ("", "garbage", PARTIAL_BOARD):
+        with pytest.raises(BoardValidationError):
+            store.save(bad)
+    assert store.board_path.read_text(encoding="utf-8") == healthy
+    assert not store.has_external_change()
+
+
+def test_unknown_wellformed_field_survives(store):
+    """An unknown but well-formed field is a warning, preserved exactly."""
+    text = (
+        "## TODO\n- [ ] S-001 Buy SSD | alien-field: keepme | due: 2026-08-20\n"
+        "## DOING\n## DONE\n## BLOCKED\n"
+    )
+    store.save(text)
+    stored = store.board_path.read_text(encoding="utf-8")
+    assert "alien-field: keepme" in stored
+
+
 def test_external_edit_detected_and_refuses_silent_save(store):
     store.save(render_board(build_board("TODO S-001 First")))
-    # someone edits the file behind our back
     atomic_write(store.board_path, render_board(build_board("TODO S-999 Sneaky")))
     assert store.has_external_change()
     with pytest.raises(ExternalEditError):
         store.save(render_board(build_board("TODO S-002 Mine")))
-    # file untouched by the refused save
     assert "S-999" in store.board_path.read_text(encoding="utf-8")
 
 
@@ -102,24 +148,6 @@ def test_save_writes_validated_snapshot(store):
     assert "S-001" in snaps[0].read_text(encoding="utf-8")
 
 
-def test_empty_or_corrupt_save_never_replaces_healthy_backup(store):
-    # healthy board -> snapshot exists
-    store.save(render_board(build_board("TODO S-001 A")))
-    assert len(list(store.history_dir.glob("snapshot-*"))) == 1
-    # an empty save must not rotate an empty snapshot over the healthy one
-    store.save("")
-    assert len(list(store.history_dir.glob("snapshot-*"))) == 1
-    healthy = store.latest_snapshot().read_text(encoding="utf-8")
-    assert "S-001" in healthy
-    # a corrupt save must not either
-    store.save("### GARBAGE not a board")
-    assert len(list(store.history_dir.glob("snapshot-*"))) == 1
-    assert store.latest_snapshot().read_text(encoding="utf-8") == healthy
-    # next healthy save rotates normally
-    store.save(render_board(build_board("TODO S-002 B")))
-    assert len(list(store.history_dir.glob("snapshot-*"))) == 2
-
-
 def test_snapshot_retention_prunes(store):
     store.snapshot_keep = 3
     for i in range(7):
@@ -140,7 +168,6 @@ def test_recover_skips_corrupt_snapshot(tmp_path):
     st = BoardStore(bp, tmp_path / ".history")
     st.save(render_board(build_board("TODO S-001 Good")))
     st.save(render_board(build_board("TODO S-002 Also good")))
-    # corrupt the newest snapshot, keep the older healthy one
     snaps = sorted(st.history_dir.glob("snapshot-*"))
     atomic_write(snaps[-1], "corrupt garbage")
     atomic_write(bp, "corrupt garbage too")
@@ -159,6 +186,42 @@ def test_recover_raises_when_no_valid_backup(tmp_path):
         st.recover()
 
 
+def test_recover_and_adopt_preserves_corrupt_primary(store):
+    store.save(render_board(build_board("TODO S-001 Golden")))
+    atomic_write(store.board_path, "### CORRUPT RAW BYTES KEEP ME")
+    text = store.recover_and_adopt()
+    assert "S-001" in text
+    # the corrupt primary was preserved byte-for-byte before recovery
+    preserved = list(store.history_dir.glob("corrupt-*.board.md"))
+    assert len(preserved) == 1
+    assert "CORRUPT RAW BYTES KEEP ME" in preserved[0].read_text(encoding="utf-8")
+    # disk / loaded_text / guard now agree on the restored state
+    assert store.loaded_text == text
+    assert not store.has_external_change()
+
+
+def test_recover_and_adopt_missing_board_with_snapshot(store):
+    """BOARD.md missing but a snapshot exists -> restored + adopted."""
+    store.save(render_board(build_board("TODO S-001 Golden")))
+    store.board_path.unlink()
+    text = store.recover_and_adopt()
+    assert "S-001" in text
+    assert store.board_path.exists()
+    assert not store.has_external_change()
+
+
+def test_recover_and_adopt_without_snapshot_refuses(store):
+    """Missing/corrupt BOARD, no snapshot -> CorruptBoardError, primary
+    untouched, no partial board adopted."""
+    store.save(render_board(build_board("TODO S-001 A")))
+    for s in store.history_dir.glob("snapshot-*"):
+        atomic_write(s, "garbage")
+    atomic_write(store.board_path, "garbage primary")
+    with pytest.raises(CorruptBoardError):
+        store.recover_and_adopt()
+    assert "garbage primary" in store.board_path.read_text(encoding="utf-8")
+
+
 def test_mirror_written_and_isolated(tmp_path):
     bp = tmp_path / "BOARD.md"
     mirror = tmp_path / "mirror"
@@ -172,9 +235,8 @@ def test_mirror_failure_does_not_fail_save(tmp_path):
     bp = tmp_path / "BOARD.md"
     mirror = tmp_path / "mirror"
     st = BoardStore(bp, tmp_path / ".history", mirror_dir=mirror, mirror=True)
-    # block mirror by making it a file
     mirror.write_text("not a dir", encoding="utf-8")
-    st.save(render_board(build_board("TODO S-001 A")))  # must not raise
+    st.save(render_board(build_board("TODO S-001 A")))
     assert "S-001" in bp.read_text(encoding="utf-8")
 
 
@@ -183,6 +245,5 @@ def test_mirror_never_read_back(tmp_path):
     mirror = tmp_path / "mirror"
     st = BoardStore(bp, tmp_path / ".history", mirror_dir=mirror, mirror=True)
     st.save(render_board(build_board("TODO S-001 A")))
-    # corrupt the mirror; the canonical state must stay untouched
     (mirror / "BOARD.md").write_text("MIRROR IS A LIE", encoding="utf-8")
     assert "S-001" in st.load()

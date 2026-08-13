@@ -7,7 +7,7 @@ SAIPLAN is a lightweight portable Windows planner that exposes SAIPEN-style
 planning to an ordinary human: goal → decompose into clear tickets → BOARD →
 execute → verify → DONE.
 
-Version 0.1.0. See [CHANGELOG.md](CHANGELOG.md).
+Version 0.1.1. See [CHANGELOG.md](CHANGELOG.md).
 
 ## What it is
 

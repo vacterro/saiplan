@@ -21,6 +21,7 @@ EVENTS = frozenset(
         "PLAN_REVIEWED",
         "RECOVERY_USED",
         "CONFLICT_DETECTED",
+        "BATCH_CREATED",
     }
 )
 

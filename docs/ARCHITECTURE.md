@@ -132,17 +132,20 @@ Ticket line (SAIPEN grammar + human fields):
   status, checkbox must agree.
 - Field separators ` | `; a literal `|` in any value escaped as `\|`; backslash
   escaped first (`\\`).
-- Field vocabulary is closed: `id, title, status` are structural; optional
-  human fields `priority, due, tags, needs, estimate, done-when, blocked-by,
-  notes-ref, created, updated`. Unknown field → surfaced as warning, never
-  silently dropped, never last-write-wins.
+- Field vocabulary is closed: structural `id, title, status`; optional human
+  fields `priority, due, tags, needs, estimate, done-when, blocked-by, details,
+  checklist, created, updated`. An unknown but well-formed `key: value` field
+  is a WARNING and is preserved byte-for-byte on re-render — never dropped.
+- A board that parses with ANY structural error (malformed line, malformed
+  field fragment, duplicate ID, duplicate single-valued field, missing/
+  duplicate required heading, ticket under unknown heading, checkbox/section
+  contradiction) is NOT writable: the bytes are preserved as
+  `.history/corrupt-<ts>.board.md` and the validated snapshot is restored.
 - Stable ID `S-###` per plan, monotonic, never reused, survives rename/drag/
   restart/sorting. Next id = max across BOARD + LOG (SAIPEN rule).
-- `needs:` lists `S-###` dependencies; blocked-by is a free-text reason
+- `needs:` lists `S-###` dependencies; `blocked-by` is a free-text reason
   (present iff section == BLOCKED).
 - New ticket → TODO by default (I2).
-- BOARD soft cap ~32 KB → collapsible DONE + archive keeps startup fast
-  (spec §20).
 
 Board is the authority; LOG.md is history. Write order: BOARD atomically first
 (flush+fsync+replace), then LOG append. A crash between the two leaves BOARD
@@ -151,33 +154,52 @@ rule, safe for a file whose LOG is not authoritative).
 
 ## Persistence & data safety (spec §9)
 
-WRITE: serialize new BOARD text → write `BOARD.md.tmp-<rand>` in same dir →
-flush → fsync → `os.replace` → update in-memory saved hash. Never write
-directly to the target.
+WRITE: serialize new BOARD text → `BoardStore.save()` REFUSES any text that is
+not a strictly valid, losslessly representable BOARD (empty or partial boards
+are rejected BEFORE any write) → atomic write (`BOARD.md.tmp-<rand>` → flush →
+fsync → `os.replace`) → update in-memory guard. Never write directly to the
+target.
+
+TRANSACTIONAL MUTATIONS: the controller never mutates the live board before
+persistence succeeds. Every mutation goes through `_transaction`:
+current → clone/candidate → mutate candidate → render → strict validate →
+`store.save()` → record history/log → ONLY THEN adopt the candidate. A refused
+save (external edit, validation error) leaves memory, disk, undo stacks and
+LOG untouched.
 
 BACKUP: `.history/` rotating snapshots — human-readable `.md` copies of
-BOARD.md (and LOG tail), rotation configurable (default keep 14), validated
-before accept (non-empty, parses, hash matches). A new empty/corrupt state
-NEVER overwrites a healthy backup.
+BOARD.md, rotation configurable (default keep 14), validated STRICTLY before
+accept (non-empty, parses with zero structural errors). A new empty/corrupt
+state NEVER overwrites a healthy backup.
 
 MIRROR: optional one-way mirror directory (config). Write-only copy of each
 save; never delete from mirror; never read mirror back into canonical state.
 
-UNDO: `.history/undo.jsonl` append-only command log (op, ticket, old/new
-field bytes, timestamp). Undo/redo replay across restart. Trash: deleted
-ticket/plan/attachment → `.trash/` (JSONL + file moves), restore works after
-restart.
+UNDO: `.history/undo.jsonl` append-only command log. Undo/redo are
+TRANSACTIONAL (peek inspects without moving the stack; commit moves a record
+only after the candidate board was persisted) and survive restart. Corrupt
+JSON lines and records missing required fields are skipped, never raised;
+stack rewrites are atomic. Trash: deleted tickets → `.history/trash.jsonl`
+with an immutable `record_id` (identity is never a timestamp); restore is
+peek → persist candidate board → mark restored (duplicate metadata is kept
+over a lost ticket).
 
-EXTERNAL EDIT: SAIPLAN loads BOARD.md, records `(sha256, mtime)`.
-On refresh/check: if bytes changed and not self-written → mark external.
-Never silently overwrite: reload, merge safely (self-change wins only on
-explicit user choice), or write `BOARD.conflict-<ts>.md` and keep both.
-SelfWriteRegistry pattern (SAIPENVIEW) attributes our own writes so the
-watcher does not flag them.
+EXTERNAL EDIT: SAIPLAN loads BOARD.md, records `(sha256, mtime)` as a guard.
+A bounded 2-second active-file poll compares the fingerprint — documented
+trade-off for a small canonical file (the two-file watcher from the original
+audit sketch was simplified; the causal model is unchanged). On mismatch the
+UI shows a conflict banner. Resolution preserves BOTH sides explicitly:
+"keep mine" writes the EXTERNAL bytes to `BOARD.conflict-external-<ts>.md`
+before the local version takes the canonical file; "reload external" writes
+the LOCAL bytes to `BOARD.conflict-local-<ts>.md` before adopting the external
+version. Neither side is ever destroyed.
 
-RECOVERY on startup: read BOARD.md; if missing/corrupt → try latest validated
-`.history` snapshot; if none → loud refusal with crash log, never a silent
-empty reset. LOG `RECOVERY_USED`.
+RECOVERY on startup: read BOARD.md; if missing/corrupt → preserve the corrupt
+bytes to `.history/corrupt-<ts>.board.md`, restore the newest validated
+snapshot atomically (`recover_and_adopt`), adopt it as the loaded state
+(disk/loaded_text/guard agree), LOG `RECOVERY_USED`. No valid snapshot → the
+plan becomes READ-ONLY: mutations, undo and redo are refused loudly, never a
+silent empty reset.
 
 ## Undo semantics
 
@@ -191,62 +213,105 @@ empty reset. LOG `RECOVERY_USED`.
 ## Timers (extras, spec §11)
 
 Two engines (FastPrompter split):
-- **Deadline timer**: absolute wall-clock target (ISO UTC persisted), repeat
-  advance() into future, snooze always later, corrupt entries skipped.
-- **Stopwatch/Pomodoro**: elapsed-time driven, pause/resume/skip, run state does
-  NOT survive restart (would be a lie).
+- **Deadline timer**: absolute wall-clock target (ISO UTC persisted, saved
+  atomically), repeat advance() into future, snooze always later, corrupt
+  entries and invalid repeat intervals (≤0 / NaN / inf) skipped safely.
+- **Stopwatch/Pomodoro**: elapsed-time driven, pause/resume/skip. Run state
+  does NOT survive restart, and the stopwatch's accumulated elapsed is
+  in-memory only — after a restart it comes back idle at 0 (documented truth,
+  matching the implementation; the doc no longer claims otherwise).
 - **Ticket timer**: start on selected ticket; records
   `{ticket_id, started_at, ended_at, duration_s, kind}` into TIMELOG.jsonl.
   Monotonic clock during process lifetime; persisted wall-clock UTC for
-  restart recovery; survives sleep/wake; completion event fires once
-  (idempotent). Timer engine runs without the timers tab visible.
+  restart recovery. A session left open by a crash is closed at next load
+  with a TRUTHFUL wall-clock duration estimate
+  (`duration_source: wall_clock_estimate`) — never silently zeroed. Timer
+  engine runs without the timers tab visible.
 
 ## Sounds (extras, spec §12)
 
 - 414 wav files shipped as assets under `sounds/`, enumerated dynamically
   (recursive, forward-slash relative names).
+- Nested paths resolve via pathlib parts (platform-neutral); `..` escapes are
+  rejected.
 - Events: timer_finished, pomodoro_work_done, break_finished, due_reminder,
   ticket_done, blocked_warning, plan_completed (+ UI niceties: click, undo…).
 - Per-event `{file, enabled, volume}`; stale-name heal on load; preview
   bypasses toggles; missing/corrupt file → silent skip, never crash;
   `winsound` fallback with sample rescaling for volume (QtMultimedia optional).
+- Semantic wiring is a UI adapter: the controller exposes `last_event` after
+  a committed mutation; the shell maps TICKET_DONE → ticket_done,
+  TICKET_BLOCKED → blocked_warning, plan-fully-completed → plan_completed.
+  Core never depends on sound.
 
 ## Themes (spec §13)
 
 - Ship all 16 Wintage `themes/*.json` verbatim into `themes/`.
-- One registry, one 21-token schema. Unknown/corrupt theme → Golden Vintage
-  fallback. Runtime switching, no restart.
+- One registry, one 21-token schema. `validate_theme(any JSON) -> list[str]`
+  NEVER raises (a token that is an int, a list, null, or broken hex cannot
+  crash validation); unknown/corrupt theme → Golden Vintage fallback, and if
+  even that is missing → an emergency palette keeps the app running (I8 is
+  executable, not aspirational). Runtime switching, no restart.
 - QSS generator emits Win95 grammar: square corners, 2px bevel
   (light top-left / dark bottom-right), raised buttons, sunken editors,
   inverted bevel when pressed, zero radius, no decorative animation.
 - Test: every shipped theme parses, carries all 21 tokens, passes WCAG AA on
   the 3 text roles vs backgroundSoft.
 
-## Single instance (spec §8/§17)
+## Single instance (spec §8/§17) — mutex is AUTHORITY
 
-- Windows named mutex (`Local\Saiplan_Write`) acquired for process lifetime.
-  Mutex = authority on "someone is running".
-- Second instance: token-authenticated QLocalServer handoff → first instance
-  shows its window, second exits. No ACK within grace → exit unresponsive,
-  never become a second writer.
+- Windows named mutex (`Local\Saiplan`) held for the process lifetime. The
+  mutex alone decides who may WRITE: first → writer; not first → never a
+  writer, ever.
+- A second instance reads a SHARED nonce (rendezvous file `data/.instance-nonce`,
+  written by the first instance) and sends it over QLocalServer; the first
+  replies with an explicit ACK. Delivery is reported only when the ACK arrives.
+- On ACK → second activates and exits 0. No ACK within the bounded startup
+  grace → second exits 1 with a clear message. It NEVER falls through to
+  becoming a second writer because IPC failed.
+- A hard-killed first releases the kernel mutex; the next process legitimately
+  becomes first.
 
 ## Logging (spec §18)
 
 - `LOG.md`: semantic events only:
   PLAN_CREATED, TICKET_CREATED, TICKET_STARTED, TICKET_BLOCKED,
   TICKET_UNBLOCKED, TICKET_DONE, TICKET_REOPENED, TICKET_EDITED,
-  TICKET_DELETED, PLAN_REVIEWED, RECOVERY_USED, CONFLICT_DETECTED.
-  Chronological, concise.
+  TICKET_DELETED, TICKET_RESTORED, BATCH_CREATED, PLAN_REVIEWED,
+  RECOVERY_USED, CONFLICT_DETECTED. Chronological, concise.
 - `logs/saiplan.log`: rotating debug/crash log (1 MB × 2). Separate from
   semantic LOG.md.
 
-## Plan Review (spec §5)
+## Plan Review (spec §5) — low-noise
 
-Checks: vague ticket (no verb / < 4 words heuristic), duplicate title, circular
-`needs:`, `needs:` missing ticket, DONE ticket with unresolved dependents
-contradiction, TODO with impossible dependency, empty plan, multiple DOING when
-single-focus configured, ticket without `done-when` where applicable.
+WARN (actionable/contradictory): empty plan, duplicate title, dangling
+`needs:` (references a ticket that is not on the board), dependency cycle,
+DOING ticket whose prerequisites are not DONE, DONE ticket whose own
+prerequisites are not DONE, BLOCKED without a blocked-by reason, multiple
+DOING under single-focus mode.
+INFO (optional only): no completion criterion set, short title.
+Waiting on a legitimate open prerequisite is NORMAL and never warned; the old
+"DONE but still needed by" check was removed as noise.
 Warnings advise; only structurally corrupt state blocks.
+
+## Plan identity + PLAN.md (spec §16/17)
+
+- `plan_id` is immutable: `<slug>-<short-id>` (uuid suffix). Human names stay
+  Unicode in PLAN.md; multilingual names never collapse onto one id; rename
+  never changes identity.
+- PLAN.md is a small structured document: known sections (Objective,
+  Constraints, Definition of Done) plus title/created are editable; ANY other
+  section a human wrote is preserved verbatim.
+- Plan creation is transactional: staged under `plans/.creating-<uuid>/`,
+  validated, then atomically renamed into place; a crash leaves no partial
+  plan. `PLAN_CREATED` is appended to the plan LOG.
+- Archive writes `archive.json` (original_plan_id + archived_at); restore
+  returns the plan to EXACTLY that id (identity is never reconstructed from a
+  filename). Archiving the active plan detaches its controller and stops its
+  ticket timers first.
+- Break Down is an atomic batch: the whole PlanProposal is validated first,
+  previewed, then committed in one transaction; invalid batches create
+  nothing.
 
 ## Product invariants (pinned here AND as tests)
 
@@ -283,18 +348,24 @@ not implemented.
 ## Build & release (Windows portable)
 
 Portable folder = source layout already: `SAIPLAN.exe` next to `data/`,
-`themes/`, `sounds/`, `logs/`. Build with Nuitka (MSVC required):
+`themes/`, `sounds/`, `logs/`. Build with Nuitka (auto-provisions MinGW64 via
+`--assume-yes-for-downloads`):
 
 ```powershell
 # from repo root, in a venv with `pip install -e .[build,dev]`
 python -m nuitka --standalone --windows-console-mode=disable `
   --enable-plugin=pyqt6 --assume-yes-for-downloads `
-  --include-package=saiplan --output-dir=build src\saiplan\main.py
-# copy to a portable folder next to the assets
+  --include-package=saiplan --output-dir=build main.py
+# copy to a portable folder next to the assets; rename main.exe -> SAIPLAN.exe
 New-Item -ItemType Directory -Force dist\SAIPLAN\data\plans
 Copy-Item build\main.dist\* dist\SAIPLAN\ -Recurse
+Rename-Item dist\SAIPLAN\main.exe dist\SAIPLAN\SAIPLAN.exe
 Copy-Item themes sounds dist\SAIPLAN\ -Recurse
 ```
+
+`main.py` at the repo root is a thin shim (`from saiplan.main import main`):
+Nuitka compiles the entry as top-level `__main__`, where package-relative
+imports would break — the shim keeps them working in the frozen exe.
 
 Sound assets stay OUTSIDE the executable on purpose (spec §10): the dist
 already carries `sounds/` beside the exe, and `data/` moves with the folder

@@ -1,5 +1,21 @@
 """Plan Review — advisory checks (spec 5). Warnings advise; only structurally
-corrupt state blocks. Every check returns (severity, message) tuples."""
+corrupt state blocks. Low-noise by design: waiting on a legitimate open
+prerequisite is NORMAL planning and never warned about.
+
+WARN (actionable / contradictory):
+- empty plan
+- duplicate title
+- dangling dependency (`needs:` a ticket that is not on the board)
+- dependency cycle
+- DOING ticket whose prerequisites are not DONE (working before its own input)
+- DONE ticket whose own prerequisites are not DONE (finished before its input)
+- BLOCKED without a blocked-by reason
+- multiple DOING under single-focus mode
+
+INFO (optional improvement only):
+- no completion criterion (done-when) set
+- short title (actionability heuristic only, never a blocker)
+"""
 
 from __future__ import annotations
 
@@ -35,11 +51,6 @@ def _cycle_members(board: Board, start_id: str) -> list[str] | None:
     return walk(start_id)
 
 
-def vague_title(title: str) -> bool:
-    words = [w for w in title.split() if w.isalnum() or any(c.isalnum() for c in w)]
-    return len(words) < 4
-
-
 def review_board(board: Board, *, single_focus: bool = True) -> list[tuple[str, str, str]]:
     """-> [(severity, ticket_id or '', message)]"""
     findings: list[tuple[str, str, str]] = []
@@ -59,22 +70,28 @@ def review_board(board: Board, *, single_focus: bool = True) -> list[tuple[str, 
             titles[low] = t.ticket_id
 
     for t in tickets:
-        if t.status in (TODO, DOING) and vague_title(t.title):
-            findings.append(
-                (WARN, t.ticket_id, ("vague ticket — state WHAT, the outcome, or what comes next"))
-            )
+        if t.status in (TODO, DOING):
+            if len([w for w in t.title.split() if any(c.isalnum() for c in w)]) < 4:
+                findings.append(
+                    (INFO, t.ticket_id, "short title — consider an action/outcome phrasing")
+                )
+            if not t.get("done-when") and not t.get("verify"):
+                findings.append((INFO, t.ticket_id, ("no completion criterion (done-when) set")))
         for need in t.needs:
             if need not in ids:
                 findings.append(
                     (WARN, t.ticket_id, f"needs {need} which does not exist on the board")
                 )
                 continue
-            if by_id[need].status in (TODO, DOING, BLOCKED):
-                findings.append((WARN, t.ticket_id, f"depends on {need} which is not DONE"))
-        if t.status in (TODO, DOING) and not t.get("done-when") and not t.get("verify"):
-            findings.append((INFO, t.ticket_id, ("no completion criterion (done-when) set")))
-
-    # cycles: check every ticket once
+            need_ticket = by_id[need]
+            if t.status == DOING and need_ticket.status != DONE:
+                findings.append(
+                    (WARN, t.ticket_id, f"is DOING but depends on {need} which is not DONE")
+                )
+            if t.status == DONE and need_ticket.status != DONE:
+                findings.append(
+                    (WARN, t.ticket_id, f"is DONE but its prerequisite {need} is not DONE")
+                )  # cycles: check every ticket once
     checked = set()
     for t in tickets:
         if t.ticket_id in checked:
@@ -93,22 +110,5 @@ def review_board(board: Board, *, single_focus: bool = True) -> list[tuple[str, 
     for t in board.sections[BLOCKED]:
         if not t.get("blocked-by"):
             findings.append((WARN, t.ticket_id, "BLOCKED without a blocked-by reason"))
-        else:
-            ok = any(
-                x in t.get("blocked-by").lower()
-                for x in (" because", "waiting", "need", "due", ":")
-            )
-            if not ok:
-                findings.append((INFO, t.ticket_id, "blocked-by reads like a label, not a fact"))
-
-    # DONE ticket depended on by an unresolved ticket is a contradiction hint
-    for t in tickets:
-        if t.status != DONE:
-            continue
-        dependents = [o.ticket_id for o in tickets if t.ticket_id in o.needs and o.status != DONE]
-        if dependents:
-            findings.append(
-                (INFO, t.ticket_id, f"DONE but still needed by: {', '.join(dependents)}")
-            )
 
     return findings

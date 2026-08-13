@@ -18,7 +18,6 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
-    QMessageBox,
     QVBoxLayout,
     QWidget,
 )
@@ -129,9 +128,12 @@ class QuickAdd(QLineEdit):
 
     def _submit(self):
         text = self.text().strip()
-        if text:
-            self._on_create(text)
-            self.clear()
+        if not text:
+            return
+        ok = self._on_create(text)
+        if ok:
+            self.clear()  # keep the typed text on failure
+        self.setFocus()
 
 
 class BoardView(QWidget):
@@ -140,6 +142,8 @@ class BoardView(QWidget):
     ticket_dropped = pyqtSignal(str, str)
     ticket_activated = pyqtSignal(str)
     ticket_selected = pyqtSignal(list)
+    mutation_succeeded = pyqtSignal()
+    quick_add_failed = pyqtSignal(str)
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -185,11 +189,18 @@ class BoardView(QWidget):
             ids.extend(self.columns[section].selected_ticket_ids())
         self.ticket_selected.emit(ids)
 
-    def _on_quick_add(self, title: str):
+    def _on_quick_add(self, title: str) -> bool:
+        """Create via the controller; on success signal the shell to refresh.
+        Returns True so QuickAdd clears only on success (failure keeps the
+        typed text). Errors surface non-modally through the signal so the app
+        never blocks on a message box."""
         try:
             self.controller.create_ticket(title)
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "SAIPLAN", str(e))
+            self.quick_add_failed.emit(str(e))
+            return False
+        self.mutation_succeeded.emit()
+        return True
 
     def focus_quick_add(self) -> None:
         self.quick_add.setFocus()
