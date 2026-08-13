@@ -1,0 +1,10 @@
+# Log
+- 13.08.26 06:26 [E-001] DEC: bootstrap SAIPEN brain for project SAIPLAN -- goal: SAIPLAN portable Windows planner (SAIPEN-style goal/task -> BOARD -> execute -> verify -> DONE; ordinary-human Mode B, plain files authority, board survives violence and moves with the folder); saipen_home C:/Users/vac34/.config/opencode/skills/saipen v7.223.0; seat opencode
+- 13.08.26 06:26 [E-002] DEC: prior delivered work (pre-saipen sessions) recorded as ## DONE T-001..T-007 -- verify evidence: pytest -q -> 150 passed, ruff clean, offscreen UI smoke 8 passed, subprocess entry smoke 2 passed, 414 wav + 16 themes byte-identical to audited sources
+- 13.08.26 06:27 [E-003] [parent: E-002] RUN: validate.py -> PASS (1 warning: no conformance record -- this line closes it)
+- 13.08.26 06:27 [E-004] [parent: E-003] [T-008] RUN: SCOUT -- T-008 repo never initialized; scope = whole SAIPLAN tree (src/ tests/ docs/ themes/ sounds/ pyproject.toml .gitignore); harness: pytest -q, ruff check src tests, ruff format src tests; build: build_windows.ps1; architecture found in docs/ARCHITECTURE.md, no parallel invented
+- 13.08.26 06:28 [E-005] [parent: E-004] [T-008] RUN: build -> git init; .gitignore extended with *.egg-info/; README.md + CHANGELOG.md (0.1.0) added for the ship surface
+- 13.08.26 06:29 [E-006] [parent: E-005] [T-008] RUN: verify -> pytest -q -> 150 passed (2 failures found first: platform hotkey tests broke under RU active layout 0x0419); ruff check clean; ruff format clean; README/CHANGELOG present; git status ignores data/ logs/
+- 13.08.26 06:29 [E-007] [parent: E-006] DEC: defect found during T-008 VERIFY -> hotkey letters relied on VkKeyScanW which returns -1 on non-Latin layouts; fixed to fixed VK for letters, layout-aware only for symbols; recorded as ## DONE T-012 with its own verify trace
+- 13.08.26 06:30 [E-008] [parent: E-007] [T-008] RUN: review -> re-ran pytest -q -> 150 passed; ruff clean; secrets scan: no hardcoded secrets (handoff_token is runtime-generated); no stray scratch files; P0/P1 clear
+- 13.08.26 06:30 [E-009] [parent: E-008] [T-008] DEC: SHIP
