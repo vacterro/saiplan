@@ -10,3 +10,4 @@ data/
 logs/
 crash.log
 nul
+.saipen/kitchen/

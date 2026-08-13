@@ -8,3 +8,8 @@
 - 13.08.26 06:29 [E-007] [parent: E-006] DEC: defect found during T-008 VERIFY -> hotkey letters relied on VkKeyScanW which returns -1 on non-Latin layouts; fixed to fixed VK for letters, layout-aware only for symbols; recorded as ## DONE T-012 with its own verify trace
 - 13.08.26 06:30 [E-008] [parent: E-007] [T-008] RUN: review -> re-ran pytest -q -> 150 passed; ruff clean; secrets scan: no hardcoded secrets (handoff_token is runtime-generated); no stray scratch files; P0/P1 clear
 - 13.08.26 06:30 [E-009] [parent: E-008] [T-008] DEC: SHIP
+- 13.08.26 06:32 [E-010] [parent: E-009] RUN: ship v0.1.0 -> committed e92bb9a; publish skipped (no origin configured; first publish requires user confirmation)
+- 13.08.26 06:33 [E-011] [parent: E-010] [T-008] DEC: T-008 DONE (committed e92bb9a, tree clean) -> done.md step 1: TODO remains -> next SCOUT T-009
+- 13.08.26 06:33 [E-012] [parent: E-011] [T-009] RUN: SCOUT -- T-009 new module src/saiplan/core/proposal.py (PlanProposal + validator + apply-to-board); neighbor core/plan.py + lifecycle.py; architecture: core stays Qt-free, controller owns persistence; harness pytest -q, ruff
+- 13.08.26 06:35 [E-013] [parent: E-012] [T-009] RUN: verify -> pytest -q -> 159 passed (9 new ai_boundary tests); ruff check clean; ruff format clean
+- 13.08.26 06:36 [E-014] [parent: E-013] [T-009] DEC: SHIP
