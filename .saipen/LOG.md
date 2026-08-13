@@ -23,3 +23,5 @@
 - 13.08.26 06:41 [E-022] [parent: E-021] RUN: ship -> committed dbc8230; publish skipped (no origin configured)
 - 13.08.26 06:41 [E-023] [parent: E-022] [T-010] DEC: T-010 DONE -> T-011 is MANUAL (human on-screen launch + polish pass, spec 24); no agent-workable TODO remains -> phase BLOCKED, WAIT for human
 - 13.08.26 06:41 [E-024] [parent: E-023] DEC: repaired ahead-stamped LOG lines per CORE 1.2 -- E-018..E-023 were written at estimated minutes 06:46..06:49 (up to 7m ahead of real UTC); restamped to 06:40..06:41, minutes inherited from real commit dbc8230 @06:41:05Z and file mtimes, not measured per-event; no line content changed, ids untouched
+- 13.08.26 07:28 [E-025] [parent: E-024] DEC: user hardening audit (data integrity / transactional / single writer / truthful recovery) executed as WAVE A-E; recorded as ## DONE T-013..T-017; T-011 remains BLOCKED (manual, human)
+- 13.08.26 07:28 [E-026] [parent: E-025] RUN: verify -> pytest -q -> 238 passed; ruff clean; Nuitka rebuild + dist launch exit 0, copied-folder launch exit 0, second-instance handoff exit 0 in 1s (first alive), kill->restart exit 0; committed 5b9252b (0.1.1)
