@@ -192,6 +192,35 @@ def test_trash_and_restore_ui(app_ctx):
     win.close()
 
 
+def test_shortcuts_cheatsheet_matches_documented_bindings(app_ctx):
+    win = _window(app_ctx)
+    from saiplan.ui.dialogs import ShortcutsDialog
+    from saiplan.ui.shell import SHORTCUTS
+
+    keys = {key for key, _description in SHORTCUTS}
+    documented = {
+        "Ctrl+N",
+        "Ctrl+Shift+N",
+        "Ctrl+F",
+        "Ctrl+Z",
+        "Ctrl+Shift+Z",
+        "Ctrl+1",
+        "Ctrl+4",
+        "Delete",
+        "Space",
+        "Ctrl+Shift+/",
+    }
+    assert documented <= keys
+    dialog = ShortcutsDialog(SHORTCUTS)
+    assert dialog.list_widget.count() == len(SHORTCUTS)
+    assert all(
+        row.text()
+        for row in (dialog.list_widget.item(i) for i in range(dialog.list_widget.count()))
+    )
+    dialog.deleteLater()
+    win.close()
+
+
 def test_wip_limit_badge_and_settings_round_trip(app_ctx):
     win = _window(app_ctx)
     plan = app_ctx.plan_store.create("WIP Plan")

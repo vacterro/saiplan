@@ -208,6 +208,25 @@ class SettingsDialog(QDialog):
         }
 
 
+class ShortcutsDialog(QDialog):
+    """One-screen reference for every keyboard binding. Pure display — the
+    bindings themselves live in shell.SHORTCUTS (single source of truth)."""
+
+    def __init__(self, shortcuts, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Keyboard shortcuts")
+        self.setMinimumSize(400, 460)
+        layout = QVBoxLayout(self)
+        self.list_widget = QListWidget()
+        for key, description in shortcuts:
+            self.list_widget.addItem(f"{key:<14}  {description}")
+        layout.addWidget(self.list_widget, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        buttons.accepted.connect(self.accept)
+        layout.addWidget(buttons)
+
+
 class SoundDialog(QDialog):
     def __init__(self, library, registry, player, parent=None):
         super().__init__(parent)

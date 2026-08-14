@@ -45,7 +45,10 @@ Hardening release — data integrity and single-writer correctness.
 - Optional per-column WIP limits (Settings): the column badge shows
   `count/limit` and a `!` when over the cap. Advisory only — single-focus
   stays the one hard rule; caps survive restart.
-- 326 tests (platform-neutral 320 + subprocess lane 6), ruff clean, Windows
+- Keyboard-shortcuts cheatsheet (`Ctrl+Shift+/`): one source of truth
+  (`shell.SHORTCUTS`) drives both the bindings and the reference dialog, so
+  the cheatsheet can never drift from the real shortcuts.
+- 327 tests (platform-neutral 321 + subprocess lane 6), ruff clean, Windows
   portable Nuitka build smoke, source/portable manifests verified.
 
 ## 0.1.0 (2026-08-13)

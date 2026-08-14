@@ -51,12 +51,32 @@ from .dialogs import (
     RecoveryDialog,
     ReviewDialog,
     SettingsDialog,
+    ShortcutsDialog,
     SoundDialog,
     StatsDialog,
     TimerPanel,
     TrashDialog,
 )
 from .inspector import Inspector
+
+SHORTCUTS: tuple[tuple[str, str], ...] = (
+    ("Ctrl+Shift+/", "Show this cheatsheet"),
+    ("Ctrl+N", "New ticket"),
+    ("Ctrl+Shift+N", "New plan"),
+    ("Ctrl+Enter", "Start selected ticket"),
+    ("Ctrl+D", "Mark done"),
+    ("Ctrl+B", "Block"),
+    ("Ctrl+Shift+R", "Reopen / unblock"),
+    ("Ctrl+F", "Search"),
+    ("Ctrl+Z", "Undo"),
+    ("Ctrl+Shift+Z", "Redo"),
+    ("Ctrl+1", "Focus DOING"),
+    ("Ctrl+2", "Focus TODO"),
+    ("Ctrl+3", "Focus DONE"),
+    ("Ctrl+4", "Focus BLOCKED"),
+    ("Delete", "Move to Trash"),
+    ("Space", "Start / pause ticket timer"),
+)
 
 
 class App:
@@ -213,24 +233,30 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.left_dock)
 
     def _build_shortcuts(self):
-        def bind(key, slot, context=None):
-            sc = QShortcut(QKeySequence(key), self)
-            sc.activated.connect(slot)
-            return sc
+        """Bind every entry of SHORTCUTS — the same table the cheatsheet
+        dialog renders, so the reference can never drift from the bindings."""
 
-        bind("Ctrl+N", self._focus_new_ticket)
-        bind("Ctrl+Shift+N", self._new_plan)
-        bind("Ctrl+Enter", lambda: self._on_selected_action(DOING))
-        bind("Ctrl+D", lambda: self._on_selected_action(DONE))
-        bind("Ctrl+B", lambda: self._on_selected_action(BLOCKED))
-        bind("Ctrl+Shift+R", lambda: self._on_selected_action(TODO))
-        bind("Ctrl+F", lambda: self.search_box.setFocus())
-        bind("Ctrl+Z", self._undo)
-        bind("Ctrl+Shift+Z", self._redo)
-        bind("Delete", self._delete_selected)
-        bind("Space", self._space_action)
+        def bind(key, slot):
+            QShortcut(QKeySequence(key), self).activated.connect(slot)
+
+        slots: dict[str, object] = {
+            "Ctrl+Shift+/": self._open_shortcuts,
+            "Ctrl+N": self._focus_new_ticket,
+            "Ctrl+Shift+N": self._new_plan,
+            "Ctrl+Enter": lambda: self._on_selected_action(DOING),
+            "Ctrl+D": lambda: self._on_selected_action(DONE),
+            "Ctrl+B": lambda: self._on_selected_action(BLOCKED),
+            "Ctrl+Shift+R": lambda: self._on_selected_action(TODO),
+            "Ctrl+F": lambda: self.search_box.setFocus(),
+            "Ctrl+Z": self._undo,
+            "Ctrl+Shift+Z": self._redo,
+            "Delete": self._delete_selected,
+            "Space": self._space_action,
+        }
         for i, section in enumerate((DOING, TODO, DONE, BLOCKED), 1):
-            bind(f"Ctrl+{i}", lambda s=section: self._focus_section(s))
+            slots[f"Ctrl+{i}"] = lambda s=section: self._focus_section(s)
+        for key, _description in SHORTCUTS:
+            bind(key, slots[key])
 
     # -- plans ---------------------------------------------------------
     def _load_plans(self):
@@ -753,6 +779,9 @@ class MainWindow(QMainWindow):
         if self.app.controller is None:
             return
         StatsDialog(self.app.controller, self).exec()
+
+    def _open_shortcuts(self):
+        ShortcutsDialog(SHORTCUTS, self).exec()
 
     def _open_recovery(self):
         if self.app.controller is None:

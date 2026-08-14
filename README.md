@@ -66,7 +66,8 @@ plan data elsewhere.
 
 Keyboard: `Ctrl+N` new ticket · `Ctrl+Shift+N` new plan · `Ctrl+F` search ·
 `Ctrl+Z` undo · `Ctrl+Shift+Z` redo · `Ctrl+1..4` jump to a column ·
-`Delete` move to Trash · `Space` start/pause the ticket timer.
+`Delete` move to Trash · `Space` start/pause the ticket timer ·
+`Ctrl+Shift+/` shows the full cheatsheet.
 
 ## Data
 
