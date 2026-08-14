@@ -102,3 +102,9 @@
 
 - 14.08.26 10:06 [E-100] [parent: E-99] RUN: hunt full sweep -- 328 tests pass, ruff clean, no stale markers, silent failures benign, no symmetry gaps, no dead code (AST zero-ref check: only heuristic false positives, all verified used); clean @ae50b57 tree cdb5bbf0
 - 14.08.26 17:25 [E-101] [parent: E-100] RUN: state repair -- ID allocators corrected: T-012/T-013 historical logs retained, board tasks reissued at T-41+ to prevent reuse.
+
+- 14.08.26 14:38 [E-102] [parent: E-101] RUN: hunt -> 1 finding @deb71e5 — forced hunt (user hh); 1) tests green (328/328); 2) LOG unverified commit found: deb71e5 (chore: add editables for build) missing ticket; 3) no stale TODO/FIXME/HACK markers; 4) silent failures benign; 5) symmetry unchanged; 6) dead code unchanged. Ticketed T-52.
+
+- 14.08.26 14:39 [E-103] [parent: E-102] [T-52] RUN: post-hoc coverage -> editables unblocks editable install, required by hatchling wheel build step (commit deb71e5); closed.
+
+- 14.08.26 14:39 [E-104] [parent: E-103] RUN: hunt -> clean @deb71e5 — second pass: 1) tests green (328/328); 2) LOG unverified commits resolved; 3) no stale TODO/FIXME/HACK markers; 4) silent failures benign; 5) symmetry unchanged; 6) dead code unchanged.
