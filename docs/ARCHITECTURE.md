@@ -372,5 +372,6 @@ already carries `sounds/` beside the exe, and `data/` moves with the folder
 (I14). Do not bundle 400 wav files into the binary.
 
 Pre-release gate: `pytest -q` green (including explicit Qt/subprocess lanes),
-`ruff check src tests` clean, and the §24 checklist manually exercised on a
-copy of the portable folder.
+`ruff check src tests` clean, and the §24 definition-of-done checklist in
+`docs/RELEASE_CHECKLIST.md` manually exercised on a copy of the portable
+folder (machine lanes are `[auto]` and scripted; the human walk is `[manual]`).

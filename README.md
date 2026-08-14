@@ -17,7 +17,8 @@ Version 0.1.1. See [CHANGELOG.md](CHANGELOG.md).
 - New tickets land in TODO. Start → Done → Block → Reopen are one click or
   one keyboard shortcut.
 - A right-hand **inspector** for priority, due date, tags, dependencies,
-  a checklist, notes, and a per-ticket timer.
+  a checklist, notes, a per-ticket timer, and file **attachments** (copied
+  into the plan folder with safe names; deleting a ticket never loses them).
 - **Break down** turns one big goal into atomic tickets with dependencies.
 - **Plan Review** warns about vague tickets, duplicates, dependency cycles
   and missing completion criteria — it advises, it never blocks.
@@ -101,6 +102,9 @@ powershell -File build_windows.ps1
 powershell -File scripts/package_source.ps1
 powershell -File scripts/package_portable.ps1
 ```
+
+Release checklist (spec §24 definition of done, machine + human lanes):
+[RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
 ## Extras are optional
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core.attachments import Attachments
 from ..core.board import (
     parse_board,
     parse_board_detailed,
@@ -273,6 +274,21 @@ class BoardController:
             board.remove(ticket_id)
 
         self._transaction("TICKET_DELETED", ticket_id, None, mut)
+
+    # -- attachments (sidecar files, not BOARD authority) -------------
+    def attach_file(self, ticket_id: str, source, dest_name: str | None = None) -> Path:
+        """Copy a file onto a ticket. Sidecar files never touch BOARD.md;
+        deleting/reopening the ticket keeps them (I6)."""
+        if self.board.get(ticket_id) is None:
+            raise ControllerError(f"no such ticket: {ticket_id}")
+        return Attachments(self.plan).attach(ticket_id, source, dest_name=dest_name)
+
+    def list_attachments(self, ticket_id: str) -> list[Path]:
+        return Attachments(self.plan).list(ticket_id)
+
+    def remove_attachment(self, ticket_id: str, name: str) -> Path:
+        """Move one attachment into the plan's attachments trash (byte-exact)."""
+        return Attachments(self.plan).remove(ticket_id, name)
 
     # -- recovery -----------------------------------------------------
     def recovery_artifacts(self) -> list[dict]:

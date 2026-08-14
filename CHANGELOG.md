@@ -38,7 +38,11 @@ Hardening release — data integrity and single-writer correctness.
   Import restores EXACT identity, never clobbers an existing plan, rejects
   corrupt boards and zip-slip members, and is transactional (staged then
   atomically renamed).
-- 310 tests (platform-neutral 304 + subprocess lane 6), ruff clean, Windows
+- Ticket attachments: copy files into `attachments/<ticket_id>/` with
+  Unicode-safe names (never overwritten, traversal impossible); removal
+  moves the file byte-exact to the plan's attachments trash; ticket
+  delete/undo/restore never loses them; `.saiplan` bundles carry them.
+- 322 tests (platform-neutral 316 + subprocess lane 6), ruff clean, Windows
   portable Nuitka build smoke, source/portable manifests verified.
 
 ## 0.1.0 (2026-08-13)

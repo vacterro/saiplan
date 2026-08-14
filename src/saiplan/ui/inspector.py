@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QInputDialog,
@@ -151,6 +154,26 @@ class Inspector(QWidget):
         notes_btn.clicked.connect(self._open_notes)
         layout.addWidget(notes_btn)
 
+        attach_label = QLabel("Attachments")
+        attach_label.setObjectName("sectionTitle")
+        layout.addWidget(attach_label)
+        self.attach_list = QListWidget()
+        self.attach_list.setMaximumHeight(100)
+        self.attach_list.itemDoubleClicked.connect(lambda _i: self._open_attachment())
+        self.attach_list.itemSelectionChanged.connect(self._update_attach_actions)
+        layout.addWidget(self.attach_list)
+        attach_row = QHBoxLayout()
+        self.attach_btn = QPushButton("Attach...")
+        self.attach_btn.clicked.connect(self._attach_file)
+        self.attach_open_btn = QPushButton("Open")
+        self.attach_open_btn.clicked.connect(self._open_attachment)
+        self.attach_remove_btn = QPushButton("Remove")
+        self.attach_remove_btn.clicked.connect(self._remove_attachment)
+        attach_row.addWidget(self.attach_btn)
+        attach_row.addWidget(self.attach_open_btn)
+        attach_row.addWidget(self.attach_remove_btn)
+        layout.addLayout(attach_row)
+
         layout.addStretch(1)
         self.setMinimumWidth(240)
 
@@ -182,6 +205,7 @@ class Inspector(QWidget):
                             self._failed_values.pop(key, None)
                 self.details_edit.setPlainText(draft)
                 self._fill_checklist("")
+                self._refresh_attachments()
                 self.unsaved_label.setText(f"Draft safely preserved: {self._conflict_draft_path}")
                 self._conflict_draft_path = None
                 self._busy = False
@@ -193,6 +217,7 @@ class Inspector(QWidget):
             self.priority_combo.setCurrentIndex(0)
             self.details_edit.setPlainText("")
             self._fill_checklist("")
+            self._refresh_attachments()
             self.timer_button.setEnabled(False)
             for b in (
                 self.btn_start,
@@ -216,6 +241,7 @@ class Inspector(QWidget):
             self._draft(ticket.ticket_id, "details", ticket.get("details"))
         )
         self._fill_checklist(self._draft(ticket.ticket_id, "checklist", ticket.get("checklist")))
+        self._refresh_attachments()
         self.timer_button.setEnabled(True)
         self._refresh_timer_state()
         # enable/disable per status
@@ -503,6 +529,59 @@ class Inspector(QWidget):
     def _open_notes(self) -> None:
         if self.ticket_id and self.on_notes:
             self.on_notes(self.ticket_id)
+
+    # -- attachments --------------------------------------------------
+    def _refresh_attachments(self) -> None:
+        self.attach_list.clear()
+        if not self.ticket_id or self.controller is None:
+            self.attach_btn.setEnabled(False)
+            self.attach_open_btn.setEnabled(False)
+            self.attach_remove_btn.setEnabled(False)
+            return
+        for path in self.controller.list_attachments(self.ticket_id):
+            item = QListWidgetItem(path.name)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            self.attach_list.addItem(item)
+        self.attach_btn.setEnabled(self.controller.board.get(self.ticket_id) is not None)
+        self._update_attach_actions()
+
+    def _update_attach_actions(self) -> None:
+        has_selection = self.attach_list.currentRow() >= 0 and bool(self.ticket_id)
+        self.attach_open_btn.setEnabled(has_selection)
+        self.attach_remove_btn.setEnabled(has_selection)
+
+    def _attach_file(self) -> None:
+        if not self.ticket_id or self.controller is None:
+            return
+        source, _filter = QFileDialog.getOpenFileName(self, "Attach file")
+        if not source:
+            return
+        try:
+            self.controller.attach_file(self.ticket_id, source)
+        except (OSError, ValueError) as exc:
+            self.save_failed.emit(f"Could not attach file: {exc}")
+            return
+        self._refresh_attachments()
+
+    def _open_attachment(self) -> None:
+        item = self.attach_list.currentItem()
+        if item is None:
+            return
+        path = item.data(Qt.ItemDataRole.UserRole)
+        if path and Path(path).is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _remove_attachment(self) -> None:
+        item = self.attach_list.currentItem()
+        if item is None or not self.ticket_id or self.controller is None:
+            return
+        name = item.text()
+        try:
+            self.controller.remove_attachment(self.ticket_id, name)
+        except OSError as exc:
+            self.save_failed.emit(f"Could not remove attachment: {exc}")
+            return
+        self._refresh_attachments()
 
     def after_board_change(self) -> None:
         """Re-sync the inspector when the board changed elsewhere."""

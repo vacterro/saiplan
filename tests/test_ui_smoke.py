@@ -192,6 +192,38 @@ def test_trash_and_restore_ui(app_ctx):
     win.close()
 
 
+def test_inspector_attach_flow_and_delete_survival(app_ctx, monkeypatch):
+    win = _window(app_ctx)
+    plan = app_ctx.plan_store.create("Attach Plan")
+    win._open_plan(plan)
+    controller = app_ctx.controller
+    ticket = controller.create_ticket("With file")
+    win.inspector.set_ticket(controller.board.get(ticket.ticket_id))
+    source = app_ctx.layout["data"] / "note.txt"
+    source.write_text("payload", encoding="utf-8")
+    monkeypatch.setattr(
+        "PyQt6.QtWidgets.QFileDialog.getOpenFileName",
+        lambda *a, **k: (str(source), ""),
+    )
+    win.inspector._attach_file()
+    assert win.inspector.attach_list.count() == 1
+    # selecting the row enables Open/Remove
+    win.inspector.attach_list.setCurrentRow(0)
+    assert win.inspector.attach_open_btn.isEnabled()
+    # delete + restore keeps the attachment listed
+    controller.delete_ticket(ticket.ticket_id)
+    win.inspector.set_ticket(None)
+    assert win.inspector.attach_list.count() == 0
+    controller.restore_ticket(ticket.ticket_id)
+    win.inspector.set_ticket(controller.board.get(ticket.ticket_id))
+    assert win.inspector.attach_list.count() == 1
+    # remove moves it to the attachments trash and clears the list
+    win.inspector.attach_list.setCurrentRow(0)
+    win.inspector._remove_attachment()
+    assert win.inspector.attach_list.count() == 0
+    win.close()
+
+
 def test_export_plan_handler_writes_bundle(app_ctx, monkeypatch):
     win = _window(app_ctx)
     plan = app_ctx.plan_store.create("Portable Plan")
