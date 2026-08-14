@@ -19,11 +19,8 @@ Safety:
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import unicodedata
-import uuid
 from pathlib import Path
 
 from ..core.persistence import create_new_bytes
@@ -42,16 +39,20 @@ _DEVICES = {
 def safe_attachment_name(name: str) -> str:
     """Unicode-preserving, filesystem-safe attachment filename (basename)."""
     name = unicodedata.normalize("NFC", name or "").strip()
-    name = Path(name).name  # never trust a caller-supplied path component
+    name = name.replace("\\", "/").split("/")[-1]
     name = _PATH_UNSAFE.sub("_", name)
     name = re.sub(r"\s+", " ", name).strip(" .")
     if not name:
         name = "attachment"
     if name.split(".")[0].lower() in _DEVICES:
         name = f"attachment-{name}"
+    if "." in name:
+        stem, ext = name.rsplit(".", 1)
+        ext = "." + ext
+    else:
+        stem, ext = name, ""
     if len(name) > 120:
-        stem, _, ext = name.rpartition(".")
-        name = stem[: 120 - len(ext) - 1] + "." + ext
+        name = stem[: 120 - len(ext)] + ext
     return name
 
 
@@ -86,20 +87,22 @@ class Attachments:
         folder = self.directory / ticket_id
         folder.mkdir(parents=True, exist_ok=True)
         base = safe_attachment_name(dest_name or source.name)
-        target = folder / base
-        if target.exists():
-            stem, dot, ext = base.rpartition(".")
-            counter = 1
-            while True:
-                candidate = folder / f"{stem}-{counter}{dot + ext if dot else ''}"
-                if not candidate.exists():
-                    target = candidate
-                    break
+        if "." in base:
+            stem, ext = base.rsplit(".", 1)
+            ext = "." + ext
+        else:
+            stem, ext = base, ""
+
+        raw = source.read_bytes()
+        counter = 0
+        while True:
+            suffix = f"-{counter}" if counter > 0 else ""
+            target = folder / f"{stem}{suffix}{ext}"
+            try:
+                create_new_bytes(target, raw)
+                break
+            except FileExistsError:
                 counter += 1
-        # atomic copy: write a temp sibling, then rename over the target
-        temp = folder / f".{target.name}.{uuid.uuid4().hex[:8]}.tmp"
-        shutil.copy2(source, temp)
-        os.replace(temp, target)
         return target
 
     def remove(self, ticket_id: str, name: str) -> Path:
@@ -108,7 +111,11 @@ class Attachments:
         if not path.is_file():
             raise FileNotFoundError(f"attachment not found: {path.name}")
         raw = path.read_bytes()
-        stem, dot, ext = path.name.rpartition(".")
+        if "." in path.name:
+            stem, ext = path.name.rsplit(".", 1)
+            ext = "." + ext
+        else:
+            stem, ext = path.name, ""
         target = self.trash_dir / ticket_id / path.name
         counter = 1
         while True:
@@ -116,8 +123,7 @@ class Attachments:
                 create_new_bytes(target, raw)  # refuses to overwrite (O_EXCL)
                 break
             except FileExistsError:
-                base = f"{stem}-{counter}{dot + ext if dot else ''}"
-                target = self.trash_dir / ticket_id / base
+                target = self.trash_dir / ticket_id / f"{stem}-{counter}{ext}"
                 counter += 1
         path.unlink()
         return target

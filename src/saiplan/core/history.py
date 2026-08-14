@@ -58,7 +58,7 @@ class History:
         keys are skipped (never a KeyError, never a crash)."""
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
+        except (OSError, UnicodeError):
             return []
         out = []
         for line in lines:
@@ -275,13 +275,15 @@ class Trash:
         }
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         return rec["record_id"]
 
     def _all(self) -> list[dict]:
         out = []
         try:
             lines = self.path.read_text(encoding="utf-8").splitlines()
-        except OSError:
+        except (OSError, UnicodeError):
             return out
         for line in lines:
             if not line.strip():

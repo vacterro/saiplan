@@ -67,6 +67,10 @@ def main() -> int:
     app.setApplicationName("SAIPLAN")
     app.setOrganizationName("saiplan")
 
+    from .ui.fonts import no_antialias_font
+
+    app.setFont(no_antialias_font(app.font()))
+
     # SINGLE WRITER GATE (mutex is authority): a process that does not own the
     # mutex must NEVER become a writer to the shared BOARD. It attempts the
     # handoff during a bounded grace window, then exits either way.

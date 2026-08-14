@@ -599,3 +599,14 @@ def test_extras_disabled_board_still_opens(tmp_path, qapp):
     assert ctx.controller.board.get(t.ticket_id).status == DOING
     assert ctx.sound_library.count() == 0
     win.close()
+
+
+def test_app_font_non_antialiased(qapp):
+    from PyQt6.QtGui import QFont
+
+    from saiplan.ui.fonts import no_antialias_font
+
+    font = no_antialias_font(qapp.font())
+    assert font.styleStrategy() == QFont.StyleStrategy.NoAntialias
+    assert font.hintingPreference() == QFont.HintingPreference.PreferFullHinting
+    assert font.family() == qapp.font().family()

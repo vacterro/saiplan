@@ -13,3 +13,9 @@ logs/
 crash.log
 nul
 .saipen/kitchen/
+.saipen/locks/
+.saipen/recovery/
+extensions/saitranslate/
+
+.saipen/extensions/
+.saipen/saitranslate/

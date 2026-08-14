@@ -78,6 +78,21 @@ def new_plan_id(name: str) -> str:
     return f"{slugify(name)}-{suffix}"
 
 
+def validate_plan_id(plan_id: str) -> None:
+    """Strictly validate a plan_id to reject traversal, absolute paths, and Windows devices."""
+    if not plan_id or not isinstance(plan_id, str):
+        raise PlanError("plan_id must be a non-empty string")
+    if "/" in plan_id or "\\" in plan_id or plan_id in (".", ".."):
+        raise PlanError(f"invalid plan_id (traversal or separator): {plan_id!r}")
+    if len(plan_id) >= 2 and plan_id[1] == ":" and plan_id[0].isalpha():
+        raise PlanError(f"invalid plan_id (Windows drive letter): {plan_id!r}")
+    if Path(plan_id).name != plan_id:
+        raise PlanError(f"invalid plan_id (not a single basename): {plan_id!r}")
+    base = plan_id.split(".")[0].lower()
+    if base in _WIN_DEVICES:
+        raise PlanError(f"invalid plan_id (Windows device name): {plan_id!r}")
+
+
 @dataclass
 class PlanNode:
     kind: str
@@ -148,7 +163,7 @@ def read_plan_doc(path: Path) -> PlanDoc:
     doc = PlanDoc()
     try:
         text = path.read_bytes().decode("utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return doc
     lines = text.splitlines(keepends=True)
     first_section = next(
@@ -341,7 +356,16 @@ class PlanStore:
             for sub in ("notes", "attachments", ".history"):
                 (staging / sub).mkdir(parents=True, exist_ok=True)
             plan = Plan(plan_id, staging, name, objective, created, constraints, definition_of_done)
-            atomic_write(staging / "PLAN.md", _render_plan_md(plan))
+            doc = PlanDoc(
+                name=plan.name,
+                created=plan.created,
+                sections={
+                    "Objective": plan.objective,
+                    "Constraints": plan.constraints,
+                    "Definition of Done": plan.definition_of_done,
+                },
+            )
+            write_plan_doc(staging / "PLAN.md", doc)
             initial_board = "## DOING\n## TODO\n## DONE\n## BLOCKED\n"
             atomic_write(staging / "BOARD.md", initial_board)
             board_store = BoardStore(staging / "BOARD.md", staging / ".history")
@@ -364,17 +388,3 @@ class PlanStore:
         except OSError as exc:
             plan.warnings.append(f"plan created, but semantic LOG recording failed: {exc}")
         return plan
-
-
-def _render_plan_md(plan: Plan) -> str:
-    parts = [f"# {plan.name}", "", f"created: {plan.created}", ""]
-    for section, value in (
-        ("Objective", plan.objective),
-        ("Constraints", plan.constraints),
-        ("Definition of Done", plan.definition_of_done),
-    ):
-        parts.append(f"## {section}")
-        if value:
-            parts.append(value)
-        parts.append("")
-    return "\n".join(parts).rstrip() + "\n"

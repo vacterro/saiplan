@@ -71,6 +71,13 @@ def validate_proposal(proposal: PlanProposal) -> list[str]:
         for need in task.needs or []:
             if not isinstance(need, str) or need not in titles:
                 problems.append(f"task {i} needs {need!r} which is not a task in the proposal")
+        if task.due:
+            try:
+                import datetime
+
+                datetime.date.fromisoformat(task.due[:10])
+            except ValueError:
+                problems.append(f"task {i} has invalid due date {task.due!r}; expected YYYY-MM-DD")
 
     # cycle detection over titles
     by_title = {t: p for t, p in zip(titles, proposal.tasks)}

@@ -35,10 +35,10 @@ the human who performed it.
 
 ## 1. Automated gates (agent)
 
-5. `[auto]` Full suite: `python -m pytest -q` → all green (322 as of 0.1.1).
+5. `[auto]` Full suite: `python -m pytest -q` → all green.
 6. `[auto]` Exact lanes: `python -m pytest -q -m "not subprocess"` and
    `python -m pytest -q -m subprocess` → counts sum to the full run with no
-   overlap (316 + 6 = 322 as of 0.1.1).
+   overlap.
 7. `[auto]` Lint + format: `python -m ruff check src tests` and
    `python -m ruff format --check src tests` → clean.
 8. `[auto]` Frozen exe smoke: run the copied folder with
@@ -94,8 +94,8 @@ you, capture the exact steps and open a ticket — do not release.
     brings the previous board back.
 
 ### 2.5 Timers, sounds, themes
-22. `[manual]` Open **Timers**: countdown, stopwatch, Pomodoro. Expect pause/
-    resume/skip work and phases survive a restart (I13).
+22. `[manual]` Open **Timers**: countdown, stopwatch, Pomodoro. Expect deadline
+    persists; ticket session crash is recovered; stopwatch/Pomodoro return idle/reset.
 23. `[manual]` Open **Sounds**: preview events, toggle a few, set volume.
     Expect no crash when a file is missing or corrupt (I8).
 24. `[manual]` Switch through ALL 16 themes one by one (Settings → theme).

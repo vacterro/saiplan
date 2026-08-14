@@ -338,7 +338,11 @@ class MainWindow(QMainWindow):
             return
         # flush any pending inspector draft so notes leave the window too
         if self.app.controller is not None and plan_id == self.app.controller.plan.plan_id:
-            self.inspector.flush_pending()
+            if not self.inspector.flush_pending():
+                self.status.showMessage(
+                    "WARNING: Export aborted; pending notes could not be saved."
+                )
+                return
         default_name = f"{plan.name}.saiplan"
         target, _filter = QFileDialog.getSaveFileName(
             self, "Export plan", default_name, "SAIPLAN bundle (*.saiplan)"

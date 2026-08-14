@@ -95,9 +95,13 @@ class BreakDownDialog(QDialog):
         tasks_label.setObjectName("sectionTitle")
         layout.addWidget(tasks_label)
         self.tasks = QPlainTextEdit()
-        self.tasks.setPlaceholderText("Buy SSD\nResearch models :: needs=S-3\nInstall :: needs=S-1")
+        self.tasks.setPlaceholderText(
+            "Buy SSD\nResearch models :: needs=Buy SSD\nInstall :: needs=Research models"
+        )
         layout.addWidget(self.tasks, 1)
-        hint = QLabel("Optional per line:  title :: needs=S-1,S-2 :: priority=high")
+        hint = QLabel(
+            "Optional per line:  title :: needs=Task Title,Other Task Title :: priority=high"
+        )
         hint.setObjectName("sectionTitle")
         layout.addWidget(hint)
         buttons = QDialogButtonBox(

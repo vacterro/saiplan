@@ -9,7 +9,7 @@ Two kinds (audited FastPrompter split, adapted):
 - ELAPSED timer (stopwatch + Pomodoro): driven by monotonic time during the
   process lifetime; run state does NOT survive restart (restoring a "running"
   stopwatch across a crash would be a lie). On restart they come back idle,
-  with accumulated elapsed kept.
+  resetting to 0 elapsed (no fake persistence).
 
 A completion fires exactly once per arm: the engine remembers in-memory that a
 timer already fired, so any number of UI refresh ticks never duplicate the
@@ -341,7 +341,7 @@ class TicketTimer:
         opens: dict[str, dict] = {}
         try:
             raw_lines = self.path.read_bytes().splitlines()
-        except FileNotFoundError:
+        except OSError:
             raw_lines = []
         for raw_line in raw_lines:
             if not raw_line.strip():
@@ -483,6 +483,13 @@ class TimerEngine:
         return timer
 
     def snooze(self, tid: str, seconds: float) -> None:
+        if (
+            isinstance(seconds, bool)
+            or not isinstance(seconds, (int, float))
+            or not math.isfinite(seconds)
+            or seconds < 1
+        ):
+            raise TimerError("snooze seconds must be a finite number >= 1")
         current = self.deadline.get(tid)
         if current is None:
             return
@@ -521,9 +528,11 @@ class TimerEngine:
                 changed = True
                 if timer.repeat_every_s and _valid_repeat(timer.repeat_every_s):
                     interval = float(timer.repeat_every_s)
-                    next_target = target + interval
-                    while next_target <= now:
-                        next_target += interval
+                    if now >= target:
+                        steps = math.floor((now - target) / interval) + 1
+                        next_target = target + steps * interval
+                    else:
+                        next_target = target + interval
                     timer.target_at = datetime.fromtimestamp(next_target, tz=UTC).strftime(
                         "%Y-%m-%dT%H:%M:%SZ"
                     )

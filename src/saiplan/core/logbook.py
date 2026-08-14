@@ -54,7 +54,7 @@ def read_log(path: Path) -> list[dict]:
     out = []
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return out
     for line in raw.splitlines():
         line = line.strip()

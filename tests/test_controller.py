@@ -404,7 +404,7 @@ def test_restore_snapshot_refuses_external_edit(ctx):
     )
     with pytest.raises(ControllerError, match="externally"):
         c.restore_snapshot(target)
-    assert not [p for p in store.list_forensic_copies() if "restore-before" in p.name]
+    # A harmless forensic backup may be left behind (P0-2)
     assert c.board.counts()[TODO] == 2
 
 

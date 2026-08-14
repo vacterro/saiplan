@@ -76,7 +76,7 @@ class BoardController:
     def _load_log(self) -> None:
         try:
             self.log_text = self.plan.log_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeError):
             self.log_text = ""
 
     def load(self) -> None:
@@ -368,12 +368,15 @@ class BoardController:
         primary = self.store.read_raw()
         sidecar_warnings: list[str] = []
 
+        if primary.raw:
+            try:
+                self.store.preserve_before_restore(primary.raw)
+            except OSError as exc:
+                raise ControllerError(
+                    f"restore backup failed; restore refused to protect data: {exc}"
+                ) from exc
+
         def record_sidecars() -> list[str]:
-            if primary.raw:
-                try:
-                    self.store.preserve_before_restore(primary.raw)
-                except OSError as exc:
-                    sidecar_warnings.append(f"restore backup failed: {exc}")
             try:
                 self.history.record("SNAPSHOT_RESTORED", previous_text, text)
             except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
