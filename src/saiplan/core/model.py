@@ -38,6 +38,17 @@ PRIORITY_ORDER = {"low": 0, "normal": 1, "high": 2, "urgent": 3}
 ID_RE = re.compile(r"^(S|T)-(\d+)$")
 
 
+def parse_needs(value: str) -> tuple[list[str], str | None]:
+    if not value.strip():
+        return [], None
+    tokens = [token.strip() for token in value.split(",")]
+    if any(not ID_RE.fullmatch(token) for token in tokens):
+        return [], f"malformed needs value {value!r}; expected comma-separated ticket IDs"
+    if len(tokens) != len(set(tokens)):
+        return [], f"duplicate dependency in needs value {value!r}"
+    return tokens, None
+
+
 class BoardError(ValueError):
     """A board that cannot be represented. Callers recover, never crash."""
 
@@ -78,9 +89,9 @@ class Ticket:
     # -- derived ------------------------------------------------------
     @property
     def needs(self) -> list[str]:
-        """Dependency ticket ids from `needs:`. Malformed entries ignored."""
-        raw = self.get("needs")
-        return re.findall(r"[ST]-\d+", raw)
+        """Exact dependency IDs. Malformed values never invent partial IDs."""
+        needs, _error = parse_needs(self.get("needs"))
+        return needs
 
     @property
     def is_open(self):

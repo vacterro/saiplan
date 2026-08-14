@@ -52,6 +52,64 @@ def test_plan_doc_preserves_unknown_sections(store):
     assert doc.sections["Constraints"] == "budget small"
 
 
+def test_plan_created_and_unknown_order_survive_updates(store):
+    plan = store.create("Ordered", "old objective")
+    path = plan.plan_md_path
+    original_created = plan.created
+    path.write_text(
+        "# Ordered\n\n"
+        f"created: {original_created}\n\n"
+        "Free prose before.\n\n"
+        "## Unknown Before\nkeep-before 日本語\n\n"
+        "## Objective\nold objective\n\n"
+        "## Unknown Middle\nkeep-middle Русский\n\n"
+        "## Constraints\nold\n\n"
+        "## Definition of Done\nold done\n\n"
+        "## Unknown After\nkeep-after Eesti\n",
+        encoding="utf-8",
+    )
+    plan.update_plan_doc(name="Renamed", objective="new objective")
+    updated = path.read_text(encoding="utf-8")
+    assert read_plan_doc(path).created == original_created
+    assert updated.index("Free prose before") < updated.index("## Unknown Before")
+    assert updated.index("## Unknown Before") < updated.index("## Objective")
+    assert updated.index("## Objective") < updated.index("## Unknown Middle")
+    assert updated.index("## Unknown Middle") < updated.index("## Constraints")
+    assert updated.index("## Definition of Done") < updated.index("## Unknown After")
+    assert "keep-before 日本語" in updated
+    assert "keep-middle Русский" in updated
+    assert "keep-after Eesti" in updated
+
+
+def test_rename_preserves_untouched_section_bytes(store):
+    plan = store.create("Raw sections")
+    path = plan.plan_md_path
+    path.write_bytes(
+        b"# Raw sections\r\n\r\ncreated: 2026-08-13\r\n\r\n"
+        b"## Objective\r\n  keep spacing  \r\n\r\n"
+        b"## Constraints\r\nkeep\r\n\r\n"
+        b"## Definition of Done\r\ndone\r\n"
+    )
+    plan.update_plan_doc(name="Renamed")
+    raw = path.read_bytes()
+    assert b"## Objective\r\n  keep spacing  \r\n\r\n" in raw
+
+
+def test_section_body_meta_markers_are_not_plan_metadata(store):
+    plan = store.create("Meta markers")
+    path = plan.plan_md_path
+    path.write_text(
+        "# Meta markers\ncreated: 2026-08-13\n## Objective\n# prose heading\n"
+        "created: not metadata\n## Constraints\nx\n## Definition of Done\ny\n",
+        encoding="utf-8",
+    )
+    doc = read_plan_doc(path)
+    assert doc.name == "Meta markers"
+    assert doc.created == "2026-08-13"
+    assert "# prose heading" in doc.sections["Objective"]
+    assert "created: not metadata" in doc.sections["Objective"]
+
+
 def test_rename_preserves_unknown_sections(store):
     plan = store.create("Rename me", "objective text")
     path = plan.plan_md_path
@@ -113,6 +171,32 @@ def test_archive_restore_with_collision(store):
     (store.plans_dir / plan.plan_id).mkdir()
     restored = archive.restore_plan(store.plans_dir, archived)
     assert restored.name == f"{plan.plan_id}-restored"
+
+
+def test_archive_restore_multiple_collisions(store):
+    plan = store.create("many-collisions")
+    archived = archive.archive_plan(store.plans_dir, plan.plan_id)
+    for name in (plan.plan_id, f"{plan.plan_id}-restored", f"{plan.plan_id}-restored-2"):
+        (store.plans_dir / name).mkdir()
+    restored = archive.restore_plan(store.plans_dir, archived)
+    assert restored.name == f"{plan.plan_id}-restored-3"
+    assert not (restored / archive.ARCHIVE_META).exists()
+
+
+def test_corrupt_archive_refuses_restore(store):
+    plan = store.create("corrupt-archive")
+    archived = archive.archive_plan(store.plans_dir, plan.plan_id)
+    (archived / "BOARD.md").write_bytes(b"\xff")
+    assert archive.restore_plan(store.plans_dir, archived) is None
+    assert archived.exists()
+
+
+def test_corrupt_archive_metadata_refuses_restore(store):
+    plan = store.create("bad-metadata")
+    archived = archive.archive_plan(store.plans_dir, plan.plan_id)
+    (archived / archive.ARCHIVE_META).write_text("{broken", encoding="utf-8")
+    assert archive.restore_plan(store.plans_dir, archived) is None
+    assert archived.exists()
 
 
 def test_legacy_archive_without_metadata_restores_by_filename(store, tmp_path):
@@ -181,6 +265,24 @@ def test_accept_proposal_cycle_creates_nothing(store, tmp_path):
     with pytest.raises(ControllerError):
         c.accept_proposal(cyc)
     assert c.board.counts()["TODO"] == 0
+
+
+def test_accept_proposal_reports_plan_update_failure(store, monkeypatch):
+    from saiplan.core.persistence import BoardStore
+    from saiplan.ui.controller import BoardController
+
+    plan = store.create("Warning plan")
+    c = BoardController(plan, BoardStore(plan.board_path, plan.history_dir))
+    c.load()
+
+    def fail(**_fields):
+        raise OSError("PLAN locked")
+
+    monkeypatch.setattr(plan, "update_plan_doc", fail)
+    created = c.accept_proposal(PlanProposal(goal="g", tasks=[TaskProposal("A")]))
+    assert len(created) == 1
+    assert c.last_result.committed
+    assert any("PLAN.md update failed" in warning for warning in c.last_result.warnings)
 
 
 def test_slugify_still_safe():

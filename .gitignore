@@ -1,4 +1,6 @@
 .venv/
+.build-venv/
+.freebuff/
 __pycache__/
 *.pyc
 *.egg-info/

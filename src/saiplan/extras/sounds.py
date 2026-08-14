@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
 logger = logging.getLogger("saiplan")
@@ -91,11 +92,21 @@ class SoundRegistry:
         entry = events.get(event)
         if not isinstance(entry, dict):
             return {"file": default, "enabled": True, "volume": 1.0}
-        file = entry.get("file") if entry.get("file") in self._available else default
+        requested = entry.get("file")
+        file = requested if isinstance(requested, str) and requested in self._available else default
+        enabled = entry.get("enabled", True)
+        if not isinstance(enabled, bool):
+            enabled = True
+        volume = entry.get("volume", 1.0)
+        if isinstance(volume, bool) or not isinstance(volume, (int, float)):
+            volume = 1.0
+        volume = float(volume)
+        if not math.isfinite(volume):
+            volume = 1.0
         return {
             "file": file,
-            "enabled": bool(entry.get("enabled", True)),
-            "volume": float(entry.get("volume", 1.0)),
+            "enabled": enabled,
+            "volume": max(0.0, min(1.0, volume)),
         }
 
     def to_config(self) -> dict:
@@ -119,6 +130,10 @@ class SoundRegistry:
         if not entry or not entry["enabled"]:
             return None
         return self.library.path_for(entry["file"])
+
+    def volume_for(self, event: str) -> float:
+        entry = self.events.get(event) or {}
+        return float(entry.get("volume", 1.0))
 
 
 class SoundPlayer:
@@ -216,4 +231,44 @@ class SoundPlayer:
                 offset += 8 + size + (size & 1)
         except Exception:  # noqa: BLE001
             return None
+        return None
+
+
+class NullSoundRegistry:
+    def __init__(self):
+        self.events = {
+            event: {"file": "", "enabled": False, "volume": 0.0} for event in KNOWN_EVENTS
+        }
+
+    def file_for(self, event: str):
+        return None
+
+    def volume_for(self, event: str) -> float:
+        return 0.0
+
+    def to_config(self) -> dict:
+        return dict(self.events)
+
+    def set(self, event: str, file: str, enabled=None, volume=None) -> None:
+        return None
+
+
+class NullSoundLibrary:
+    def all_files(self) -> list[str]:
+        return []
+
+    def count(self) -> int:
+        return 0
+
+    def path_for(self, rel: str):
+        return None
+
+
+class NullSoundPlayer:
+    def play_file(self, path, volume=1.0) -> None:
+        return None
+
+    preview = play_file
+
+    def stop_preview(self) -> None:
         return None

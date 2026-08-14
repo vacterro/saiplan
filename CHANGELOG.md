@@ -28,7 +28,18 @@ Hardening release — data integrity and single-writer correctness.
 - Break Down is an atomic validated batch; checklist is in the field contract.
 - Timers: atomic persistence, invalid repeat intervals rejected, truthful
   wall-clock crash recovery, stopwatch/pomodoro/countdown UI fixes.
-- 238 tests, ruff clean, Windows portable Nuitka build smoke.
+- Recovery dialog: browse rotating snapshots and forensic corrupt/
+  pre-restore copies, preview, and restore any validated snapshot — the
+  current board is backed up byte-exact first, undo and a `SNAPSHOT_RESTORED`
+  LOG event are kept, and refusals (external edit, read-only, invalid
+  snapshot) leave no trace.
+- Plan export/import: any plan is one portable `.saiplan` bundle (PLAN.md,
+  BOARD.md, LOG.md, timelog, notes, `.history` incl. id-sequence watermark).
+  Import restores EXACT identity, never clobbers an existing plan, rejects
+  corrupt boards and zip-slip members, and is transactional (staged then
+  atomically renamed).
+- 310 tests (platform-neutral 304 + subprocess lane 6), ruff clean, Windows
+  portable Nuitka build smoke, source/portable manifests verified.
 
 ## 0.1.0 (2026-08-13)
 
@@ -44,6 +55,6 @@ SAIPEN-style planning for ordinary humans.
 - Data safety: atomic writes, validated rotating snapshots, one-way mirror,
   persisted undo/redo, trash, external-edit detection with conflict copies.
 - Timers: countdown, stopwatch, Pomodoro, ticket timers into TIMELOG.jsonl.
-- Sounds: 414-event library with preview and per-event mapping.
+- Sounds: 414-file asset library with preview and per-event mapping.
 - Themes: all 16 Wintage packs, Golden Vintage default, runtime switching.
 - Portability: single exe folder, data/assets/config move together.

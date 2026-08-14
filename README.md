@@ -22,7 +22,12 @@ Version 0.1.1. See [CHANGELOG.md](CHANGELOG.md).
 - **Plan Review** warns about vague tickets, duplicates, dependency cycles
   and missing completion criteria — it advises, it never blocks.
 - Persisted **undo**, **trash** (nothing is ever permanently deleted), and
-  rotating snapshots so a crashed machine loses nothing.
+  rotating snapshots so a crashed machine loses nothing. A **Recovery**
+  dialog browses snapshots and forensic copies and restores any validated
+  one — the current board is backed up byte-exact first.
+- **Export / Import**: any plan is one portable `.saiplan` file (board, notes,
+  history and identity travel together). Import restores the exact same plan
+  and never overwrites an existing one.
 - External edits to a board are detected, never silently overwritten.
 
 ## Install
@@ -81,13 +86,20 @@ Board lines look like:
 
 ## Build from source
 
-Requires Python 3.11+, `pip install -e .[dev]`.
+Requires Python 3.11+. Build dependencies are pinned; bootstrap once, then
+build without package upgrades.
 
 ```
-pytest -q                       # 150 tests
+python -m pip install -e .[dev]
+pytest -q
+pytest -q -m "not subprocess"  # platform-neutral lane
+pytest -q -m subprocess        # process/Windows integration lane
 python -m ruff check src tests
-python -m ruff format src tests
-powershell -File build_windows.ps1   # Nuitka portable build
+python -m ruff format --check src tests
+powershell -File bootstrap-build-env.ps1
+powershell -File build_windows.ps1
+powershell -File scripts/package_source.ps1
+powershell -File scripts/package_portable.ps1
 ```
 
 ## Extras are optional

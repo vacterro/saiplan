@@ -16,9 +16,18 @@ side is ever destroyed.
 
 from __future__ import annotations
 
-from ..core.board import parse_board, parse_board_detailed, render_board, render_ticket
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from ..core.board import (
+    parse_board,
+    parse_board_detailed,
+    render_board,
+    render_ticket,
+    validate_board_semantics,
+)
 from ..core.config import Config
-from ..core.history import History, Trash
+from ..core.history import History, IdSequence, Trash
 from ..core.lifecycle import TransitionRefused, create_ticket, transition
 from ..core.logbook import append_event
 from ..core.model import BLOCKED, DOING, DONE, TODO, Board, BoardError
@@ -26,21 +35,24 @@ from ..core.persistence import (
     BoardStore,
     BoardValidationError,
     CorruptBoardError,
+    DiskState,
     ExternalEditError,
+    validate_snapshot,
 )
 from ..core.plan import Plan
 from ..core.review import review_board
 
-STATUS_EVENTS = {
-    DOING: "TICKET_STARTED",
-    DONE: "TICKET_DONE",
-    BLOCKED: "TICKET_BLOCKED",
-    TODO: "TICKET_REOPENED",
-}
-
 
 class ControllerError(Exception):
     pass
+
+
+@dataclass
+class MutationResult:
+    committed: bool
+    warnings: list[str] = field(default_factory=list)
+    event: str | None = None
+    ticket_id: str | None = None
 
 
 class BoardController:
@@ -49,12 +61,14 @@ class BoardController:
         self.store = store
         self.config = config
         self.history = History(plan.undo_dir)
+        self.id_sequence = IdSequence(plan.history_dir, plan.board_path, plan.log_path)
         self.board = Board()
         self.log_text = ""
         self.warnings: list[str] = []
         self._readonly = False
         # last committed semantic event, consumed by the UI sound adapter
         self.last_event: str | None = None
+        self.last_result = MutationResult(False)
         self._load_log()
 
     # -- loading ------------------------------------------------------
@@ -73,8 +87,13 @@ class BoardController:
         - no valid snapshot -> loud READ-ONLY state; mutations are refused
         - never silently start with a partial parsed board as authority
         """
-        text = self.store.load()
+        try:
+            text = self.store.load()
+        except CorruptBoardError:
+            text = ""
         board, errors, warnings = parse_board_detailed(text)
+        single_focus = bool(self.config.get("single_focus", True)) if self.config else True
+        errors.extend(validate_board_semantics(board, single_focus=single_focus))
         self._readonly = False
         if errors:
             # primary missing, empty or structurally invalid -> attempt a
@@ -83,7 +102,12 @@ class BoardController:
             try:
                 text = self.store.recover_and_adopt()
                 board, errors2, warnings2 = parse_board_detailed(text)
-                warnings = [f"recovered from snapshot: {e}" for e in errors2] + warnings2
+                errors2.extend(validate_board_semantics(board, single_focus=single_focus))
+                if errors2:
+                    raise CorruptBoardError(
+                        f"recovery snapshot is semantically invalid: {errors2[0]}"
+                    )
+                warnings = warnings2
                 errors = []
                 append_event(self.plan.log_path, "RECOVERY_USED", detail=self.plan.board_path.name)
             except CorruptBoardError as e:
@@ -114,15 +138,39 @@ class BoardController:
             )
         candidate = self._clone()
         result = mutator(candidate)
+        previous_text = render_board(self.board)
         text = render_board(candidate)
+        if text == previous_text:
+            self.last_event = None
+            self.last_result = MutationResult(False, event=None, ticket_id=ticket_id)
+            return result
         _b, errors, _w = parse_board_detailed(text)
         if errors:
             raise ControllerError(
                 f"internal error: mutation produced an invalid board: {errors[0]}"
             )
-        prev = self.store.loaded_text or ""
+        single_focus = bool(self.config.get("single_focus", True)) if self.config else True
+        semantic_errors = validate_board_semantics(candidate, single_focus=single_focus)
+        if semantic_errors:
+            raise ControllerError(semantic_errors[0])
+        if ticket_id is None and hasattr(result, "ticket_id"):
+            ticket_id = result.ticket_id
+        sidecar_warnings: list[str] = []
+
+        def record_sidecars() -> list[str]:
+            try:
+                self.history.record(event or "EDIT", previous_text, text)
+            except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
+                sidecar_warnings.append(f"history recording failed: {exc}")
+            if event:
+                try:
+                    append_event(self.plan.log_path, event, ticket_id, detail)
+                except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
+                    sidecar_warnings.append(f"semantic LOG recording failed: {exc}")
+            return sidecar_warnings
+
         try:
-            self.store.save(text)
+            self.store.save(text, after_commit=record_sidecars)
         except ExternalEditError:
             raise ControllerError(
                 "BOARD.md changed externally; resolve the conflict or reload first"
@@ -131,13 +179,11 @@ class BoardController:
             raise ControllerError(str(e))
         # ONLY NOW adopt the candidate
         self.board = candidate
-        if ticket_id is None and hasattr(result, "ticket_id"):
-            ticket_id = result.ticket_id
-        self.history.record(event or "EDIT", prev, text)
-        if event:
-            append_event(self.plan.log_path, event, ticket_id, detail)
+        sidecar_warnings = list(self.store.last_warnings)
         self.log_text += f" {ticket_id or ''}"
         self.last_event = event
+        self.warnings.extend(sidecar_warnings)
+        self.last_result = MutationResult(True, sidecar_warnings, event, ticket_id)
         return result
 
     # -- mutations -----------------------------------------------------
@@ -145,10 +191,17 @@ class BoardController:
         if not title.strip():
             raise ControllerError("ticket title is empty")
 
+        ticket_id = self.id_sequence.reserve()[0]
+
         def mut(board: Board):
             try:
                 return create_ticket(
-                    board, title, log_text=self.log_text, fields=fields, status=status
+                    board,
+                    title,
+                    tid=ticket_id,
+                    log_text=self.log_text,
+                    fields=fields,
+                    status=status,
                 )
             except TransitionRefused as e:
                 raise ControllerError(str(e))
@@ -156,6 +209,11 @@ class BoardController:
         return self._transaction("TICKET_CREATED", None, None, mut)
 
     def transition(self, ticket_id: str, target: str, reason: str | None = None):
+        source = self.board.get(ticket_id).status if self.board.get(ticket_id) else None
+        if source == target:
+            self.last_event = None
+            self.last_result = MutationResult(False)
+            return self.board.get(ticket_id)
         if target == BLOCKED and not (reason or "").strip():
             raise ControllerError("blocking requires a reason")
         if (
@@ -168,12 +226,22 @@ class BoardController:
 
         def mut(board: Board):
             try:
-                transition(board, ticket_id, target, reason)
+                single_focus = bool(self.config.get("single_focus", True)) if self.config else True
+                transition(board, ticket_id, target, reason, single_focus=single_focus)
             except TransitionRefused as e:
                 raise ControllerError(str(e))
             return board.get(ticket_id)
 
-        event = STATUS_EVENTS.get(target, "TICKET_EDITED")
+        if source == BLOCKED and target == TODO:
+            event = "TICKET_UNBLOCKED"
+        elif source == DONE and target == TODO:
+            event = "TICKET_REOPENED"
+        else:
+            event = {
+                DOING: "TICKET_STARTED",
+                DONE: "TICKET_DONE",
+                BLOCKED: "TICKET_BLOCKED",
+            }.get(target, "TICKET_EDITED")
         return self._transaction(event, ticket_id, reason, mut)
 
     def edit_field(self, ticket_id: str, key: str, value: str) -> None:
@@ -205,6 +273,116 @@ class BoardController:
             board.remove(ticket_id)
 
         self._transaction("TICKET_DELETED", ticket_id, None, mut)
+
+    # -- recovery -----------------------------------------------------
+    def recovery_artifacts(self) -> list[dict]:
+        """Read-only listing for the Recovery UI: rotating snapshots
+        (restorable when valid) plus forensic corrupt / restore-before copies
+        (view-only evidence). Newest first. Never touches the board."""
+        artifacts: list[dict] = []
+        for path in self.store.list_snapshots():
+            valid = validate_snapshot(path)
+            artifacts.append(
+                {
+                    "kind": "snapshot",
+                    "path": str(path),
+                    "mtime_ns": path.stat().st_mtime_ns,
+                    "valid": valid,
+                    "summary": self._artifact_summary(path),
+                }
+            )
+        for path in self.store.list_forensic_copies():
+            is_restore = "restore-before" in path.name
+            artifacts.append(
+                {
+                    "kind": "restore-before" if is_restore else "corrupt",
+                    "path": str(path),
+                    "mtime_ns": path.stat().st_mtime_ns,
+                    "valid": False,
+                    "summary": self._artifact_summary(path),
+                }
+            )
+        artifacts.sort(key=lambda a: a["mtime_ns"], reverse=True)
+        return artifacts
+
+    def _artifact_summary(self, path: Path) -> str:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return "unreadable"
+        board, errors, _w = parse_board_detailed(text)
+        if errors:
+            return "not a valid board (view only)"
+        counts = board.counts()
+        return " ".join(f"{k} {counts[k]}" for k in ("DOING", "TODO", "DONE", "BLOCKED"))
+
+    def restore_snapshot(self, snapshot_path) -> MutationResult:
+        """Human-initiated restore of a validated snapshot over BOARD.md.
+
+        Safety, in order: refuses a read-only plan, a snapshot that is not a
+        strictly valid board, and an externally-changed primary (I5). Then
+        preserves the current primary byte-exact to `.history/restore-before-*`
+        (I6), records an undo entry (previous_text -> snapshot text), appends
+        `SNAPSHOT_RESTORED` to the semantic LOG, and adopts the snapshot only
+        AFTER the save lands — a refused save changes nothing.
+        """
+        if self._readonly:
+            raise ControllerError("plan is read-only; restore refused")
+        path = Path(snapshot_path)
+        if not validate_snapshot(path):
+            raise ControllerError("chosen file is not a trustworthy BOARD snapshot")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ControllerError(f"snapshot unreadable: {exc}") from exc
+        board, errors, _w = parse_board_detailed(text)
+        if errors:
+            raise ControllerError(f"snapshot is not a valid board: {errors[0]}")
+        single_focus = bool(self.config.get("single_focus", True)) if self.config else True
+        semantic_errors = validate_board_semantics(board, single_focus=single_focus)
+        if semantic_errors:
+            raise ControllerError(f"snapshot fails semantic validation: {semantic_errors[0]}")
+        previous_text = render_board(self.board)
+        if text == previous_text:
+            self.last_event = None
+            self.last_result = MutationResult(False)
+            return self.last_result
+        # capture the pre-restore primary bytes NOW; the byte-exact backup is
+        # written only after the save lands, so a refused restore leaves no trace
+        primary = self.store.read_raw()
+        sidecar_warnings: list[str] = []
+
+        def record_sidecars() -> list[str]:
+            if primary.raw:
+                try:
+                    self.store.preserve_before_restore(primary.raw)
+                except OSError as exc:
+                    sidecar_warnings.append(f"restore backup failed: {exc}")
+            try:
+                self.history.record("SNAPSHOT_RESTORED", previous_text, text)
+            except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
+                sidecar_warnings.append(f"history recording failed: {exc}")
+            try:
+                append_event(self.plan.log_path, "SNAPSHOT_RESTORED", detail=path.name)
+            except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
+                sidecar_warnings.append(f"semantic LOG recording failed: {exc}")
+            return sidecar_warnings
+
+        try:
+            self.store.save(text, after_commit=record_sidecars)
+        except ExternalEditError:
+            raise ControllerError(
+                "BOARD.md changed externally; resolve the conflict or reload first"
+            )
+        except BoardValidationError as exc:
+            raise ControllerError(str(exc))
+        # ONLY NOW adopt the snapshot
+        self.board = board
+        sidecar_warnings = list(self.store.last_warnings)
+        self.warnings.extend(sidecar_warnings)
+        self.last_event = "SNAPSHOT_RESTORED"
+        self.last_result = MutationResult(True, sidecar_warnings, "SNAPSHOT_RESTORED")
+        return self.last_result
 
     def restore_ticket(self, ticket_id: str) -> None:
         trash = Trash(self.plan.history_dir)
@@ -239,18 +417,27 @@ class BoardController:
             raise ControllerError(
                 "BOARD.md changed externally; undo blocked — resolve the conflict first"
             )
-        current = render_board(self.board)
-        rec = self.history.peek_undo(current)
-        if rec is None:
-            return False
-        candidate = rec["prev"]
-        board, errors, _w = parse_board_detailed(candidate)
-        if errors:
-            raise ControllerError("undo target is unreadable; history may be corrupt")
-        self.store.save(candidate)  # never allow_external for ordinary undo
-        self.board = board
-        self.warnings = []
-        self.history.commit_undo(rec)
+        with self.history.locked():
+            current = render_board(self.board)
+            rec = self.history.peek_undo(current)
+            if rec is None:
+                return False
+            candidate = rec["prev"]
+            board, errors, _w = parse_board_detailed(candidate)
+            single_focus = bool(self.config.get("single_focus", True)) if self.config else True
+            errors.extend(validate_board_semantics(board, single_focus=single_focus))
+            if errors:
+                raise ControllerError("undo target is unreadable; history may be corrupt")
+            self.store.save(candidate)  # never allow_external for ordinary undo
+            self.board = board
+            self.warnings = []
+            sidecar_warnings = list(self.store.last_warnings)
+            try:
+                self.history.commit_undo(rec["record_id"])
+            except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
+                sidecar_warnings.append(f"undo history commit failed: {exc}")
+            self.warnings.extend(sidecar_warnings)
+            self.last_result = MutationResult(True, sidecar_warnings, "UNDO")
         self.last_event = "UNDO"
         return True
 
@@ -261,18 +448,27 @@ class BoardController:
             raise ControllerError(
                 "BOARD.md changed externally; redo blocked — resolve the conflict first"
             )
-        current = render_board(self.board)
-        rec = self.history.peek_redo(current)
-        if rec is None:
-            return False
-        candidate = rec["after"]
-        board, errors, _w = parse_board_detailed(candidate)
-        if errors:
-            raise ControllerError("redo target is unreadable; history may be corrupt")
-        self.store.save(candidate)
-        self.board = board
-        self.warnings = []
-        self.history.commit_redo(rec)
+        with self.history.locked():
+            current = render_board(self.board)
+            rec = self.history.peek_redo(current)
+            if rec is None:
+                return False
+            candidate = rec["after"]
+            board, errors, _w = parse_board_detailed(candidate)
+            single_focus = bool(self.config.get("single_focus", True)) if self.config else True
+            errors.extend(validate_board_semantics(board, single_focus=single_focus))
+            if errors:
+                raise ControllerError("redo target is unreadable; history may be corrupt")
+            self.store.save(candidate)
+            self.board = board
+            self.warnings = []
+            sidecar_warnings = list(self.store.last_warnings)
+            try:
+                self.history.commit_redo(rec["record_id"])
+            except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
+                sidecar_warnings.append(f"redo history commit failed: {exc}")
+            self.warnings.extend(sidecar_warnings)
+            self.last_result = MutationResult(True, sidecar_warnings, "REDO")
         self.last_event = "REDO"
         return True
 
@@ -288,24 +484,11 @@ class BoardController:
 
     def external_text(self) -> str | None:
         """Current on-disk bytes (the side that caused the conflict)."""
-        try:
-            return self.board_path.read_text(encoding="utf-8")
-        except OSError:
-            return None
+        return self.store.read_raw().text
 
     @property
     def board_path(self):
         return self.plan.board_path
-
-    def _conflict_target(self, side: str) -> object:
-        import time
-
-        from ..core.persistence import atomic_write
-
-        target = self.plan.directory / (
-            f"BOARD.conflict-{side}-{time.strftime('%Y%m%d-%H%M%S')}.md"
-        )
-        return target, atomic_write
 
     def resolve_keep_mine(self) -> str | None:
         """Keep the LOCAL version as canonical. The EXTERNAL version is
@@ -313,46 +496,77 @@ class BoardController:
         is verified does the local version overwrite the canonical file.
         Never destroys either side."""
         local = render_board(self.board)
-        external = self.external_text()
+        external = self.store.read_raw()
         copy_path = None
-        if external is not None:
-            target, atomic_write = self._conflict_target("external")
+        detail: str
+        if external.raw is not None:
             try:
-                atomic_write(target, external)
+                target = self.store.preserve_raw_conflict(external.raw, "external")
                 copy_path = str(target)
             except OSError:
                 raise ControllerError("could not write the external conflict copy; nothing changed")
-        self.store.save(local, allow_external=True)
-        append_event(
-            self.plan.log_path,
-            "CONFLICT_DETECTED",
-            detail=f"kept local; external preserved in {target.name}",
-        )
+            detail = f"kept local; external preserved in {target.name}"
+        else:
+            detail = "kept local; external BOARD.md was missing"
+        try:
+            self.store.save(local, expected_guard=external.fingerprint)
+        except ExternalEditError as exc:
+            raise ControllerError(
+                "BOARD.md changed again during conflict resolution; retry"
+            ) from exc
+        warnings = list(self.store.last_warnings)
+        try:
+            append_event(self.plan.log_path, "CONFLICT_DETECTED", detail=detail)
+        except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
+            warnings.append(f"semantic LOG recording failed: {exc}")
+        self.warnings.extend(warnings)
+        self.last_result = MutationResult(True, warnings, "CONFLICT_RESOLVED")
         self.last_event = "CONFLICT_RESOLVED"
         return copy_path
 
     def resolve_reload_external(self) -> str | None:
         """Adopt the EXTERNAL version as canonical. The LOCAL version is
         written to BOARD.conflict-local-<ts>.md first so nothing is lost."""
-        external = self.external_text()
-        if external is None:
-            return None
-        local = render_board(self.board)
-        target, atomic_write = self._conflict_target("local")
+        external = self.store.read_raw()
+        local = (
+            self.store.loaded_bytes
+            if self.store.loaded_bytes is not None
+            else render_board(self.board).encode("utf-8")
+        )
         try:
-            atomic_write(target, local)
+            target = self.store.preserve_raw_conflict(local, "local")
         except OSError:
             raise ControllerError("could not write the local conflict copy; nothing changed")
-        self.store.load()  # adopt external bytes + refresh guard
-        board, errors, warnings = parse_board_detailed(external)
-        self.board = board
+        if self.store.read_raw().fingerprint != external.fingerprint:
+            raise ControllerError("BOARD.md changed again during conflict resolution; retry")
+        self.store.guard = external.fingerprint
+        self.store.loaded_bytes = external.raw
+        self.store.loaded_text = external.text
+        if external.state == DiskState.MISSING:
+            self.board = Board()
+            errors = ["external BOARD.md is missing"]
+            warnings = []
+        elif external.text is None:
+            self.board = Board()
+            errors = ["external BOARD.md is not valid UTF-8"]
+            warnings = []
+        else:
+            self.board, errors, warnings = parse_board_detailed(external.text)
+            single_focus = bool(self.config.get("single_focus", True)) if self.config else True
+            errors.extend(validate_board_semantics(self.board, single_focus=single_focus))
         self.warnings = [f"BOARD.md: {e}" for e in errors] + warnings
-        self._readonly = bool(errors)  # a corrupt external version makes it read-only
-        append_event(
-            self.plan.log_path,
-            "CONFLICT_DETECTED",
-            detail=f"reloaded external; local preserved in {target.name}",
-        )
+        self._readonly = bool(errors)
+        sidecar_warnings = []
+        try:
+            append_event(
+                self.plan.log_path,
+                "CONFLICT_DETECTED",
+                detail=f"reloaded external; local preserved in {target.name}",
+            )
+        except Exception as exc:  # noqa: BLE001 - sidecar cannot negate committed BOARD
+            sidecar_warnings.append(f"semantic LOG recording failed: {exc}")
+        self.warnings.extend(sidecar_warnings)
+        self.last_result = MutationResult(True, sidecar_warnings, "CONFLICT_RESOLVED")
         self.last_event = "CONFLICT_RESOLVED"
         return str(target)
 
@@ -372,8 +586,10 @@ class BoardController:
         if problems:
             raise ControllerError("proposal is invalid: " + "; ".join(problems[:5]))
 
+        ticket_ids = self.id_sequence.reserve(len(proposal.tasks))
+
         def mut(board: Board):
-            return apply_proposal(board, proposal, log_text=self.log_text)
+            return apply_proposal(board, proposal, log_text=self.log_text, ticket_ids=ticket_ids)
 
         created = self._transaction("BATCH_CREATED", None, None, mut)
         # BOARD (authority) already persisted; now update the descriptive doc
@@ -383,8 +599,10 @@ class BoardController:
                 constraints=proposal.constraints,
                 definition_of_done=proposal.definition_of_done,
             )
-        except OSError:
-            pass  # a stale PLAN.md must not undo the committed tickets
+        except (OSError, UnicodeError) as exc:
+            warning = f"tickets committed, but PLAN.md update failed: {exc}"
+            self.warnings.append(warning)
+            self.last_result.warnings.append(warning)
         return created
 
 

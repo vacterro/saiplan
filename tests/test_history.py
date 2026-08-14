@@ -8,7 +8,7 @@ record_id — two deletes in the same second stay independent.
 from conftest import build_board
 
 from saiplan.core.board import render_board
-from saiplan.core.history import UNDO_CAP, History, Trash
+from saiplan.core.history import UNDO_CAP, History, IdSequence, Trash
 
 
 def _mk(h, *sections):
@@ -36,7 +36,7 @@ def test_commit_undo_moves_record(tmp_path):
     b = render_board(build_board("TODO S-002 B"))
     h.record("create", a, b)
     rec = h.peek_undo(b)
-    h.commit_undo(rec)
+    h.commit_undo(rec["record_id"])
     assert len(h._read_lines(h.undo_path)) == 0
     assert len(h._read_lines(h.redo_path)) == 1
     # redo can now peek it
@@ -50,9 +50,9 @@ def test_commit_redo_returns_record(tmp_path):
     b = render_board(build_board("TODO S-002 B"))
     h.record("create", a, b)
     rec = h.peek_undo(b)
-    h.commit_undo(rec)
+    h.commit_undo(rec["record_id"])
     rec2 = h.peek_redo(a)
-    h.commit_redo(rec2)
+    h.commit_redo(rec2["record_id"])
     assert len(h._read_lines(h.undo_path)) == 1
     assert len(h._read_lines(h.redo_path)) == 0
 
@@ -65,7 +65,7 @@ def test_history_survives_restart(tmp_path):
     h2 = History(tmp_path)  # restart
     rec = h2.peek_undo(b)
     assert rec["prev"] == a
-    h2.commit_undo(rec)
+    h2.commit_undo(rec["record_id"])
     h3 = History(tmp_path)
     assert h3.peek_redo(a)["after"] == b
 
@@ -77,7 +77,7 @@ def test_new_mutation_clears_redo(tmp_path):
     c = render_board(build_board("TODO S-003 C"))
     h.record("create", a, b)
     rec = h.peek_undo(b)
-    h.commit_undo(rec)
+    h.commit_undo(rec["record_id"])
     h.record("create", a, c)  # new mutation invalidates redo
     assert not h.can_redo()
 
@@ -107,6 +107,76 @@ def test_missing_required_keys_skipped(tmp_path):
     # prev==a matches current -> skipped
     assert h.peek_undo("a") is None
     assert h.peek_undo("b")["prev"] == "a"
+
+
+def test_legacy_noop_history_pruned_on_restart(tmp_path):
+    path = tmp_path / "undo.jsonl"
+    path.write_text(
+        '{"prev":"same","after":"same"}\n{"prev":"before","after":"after"}\n',
+        encoding="utf-8",
+    )
+    h = History(tmp_path)
+    records = h._read_lines(path)
+    assert len(records) == 1
+    assert records[0]["record_id"]
+    assert h.peek_undo("after")["record_id"] == records[0]["record_id"]
+
+
+def test_commit_requires_exact_peeked_record(tmp_path):
+    h = History(tmp_path)
+    h.record("create", "a", "b")
+    rec = h.peek_undo("b")
+    with __import__("pytest").raises(RuntimeError):
+        h.commit_undo("not-the-peeked-record")
+    assert h.peek_undo("b")["record_id"] == rec["record_id"]
+
+
+def test_duplicate_legacy_record_ids_are_migrated(tmp_path):
+    duplicate = "same-id"
+    (tmp_path / "undo.jsonl").write_text(
+        f'{{"record_id":"{duplicate}","prev":"a","after":"b"}}\n'
+        f'{{"record_id":"{duplicate}","prev":"b","after":"c"}}\n',
+        encoding="utf-8",
+    )
+    records = History(tmp_path)._read_lines(tmp_path / "undo.jsonl")
+    assert len({record["record_id"] for record in records}) == 2
+
+
+def test_id_sequence_self_heals_and_stays_ahead(tmp_path):
+    board = tmp_path / "BOARD.md"
+    log = tmp_path / "LOG.md"
+    history = tmp_path / ".history"
+    history.mkdir()
+    board.write_text("## TODO\n- [ ] S-9 Existing\n", encoding="utf-8")
+    log.write_text("mentions T-4\n", encoding="utf-8")
+    sequence = IdSequence(history, board, log)
+    assert sequence.reserve() == ["S-10"]
+    board.write_text("## TODO\n", encoding="utf-8")
+    assert sequence.reserve() == ["S-11"]
+    assert sequence.reserve(prefix="T") == ["T-5"]
+
+
+def test_id_sequence_recovers_from_corruption_using_history_and_trash(tmp_path):
+    board = tmp_path / "BOARD.md"
+    log = tmp_path / "LOG.md"
+    history = tmp_path / ".history"
+    history.mkdir()
+    board.write_text("## TODO\n", encoding="utf-8")
+    log.write_text("# LOG\n", encoding="utf-8")
+    (history / "undo.jsonl").write_text('{"prev":"S-12","after":"S-13"}\n', encoding="utf-8")
+    (history / "trash.jsonl").write_text('{"ticket_id":"S-15"}\n', encoding="utf-8")
+    (history / "id-sequence.json").write_text("{broken", encoding="utf-8")
+    assert IdSequence(history, board, log).reserve() == ["S-16"]
+
+
+def test_id_sequence_ignores_unbounded_integer_token(tmp_path):
+    board = tmp_path / "BOARD.md"
+    log = tmp_path / "LOG.md"
+    history = tmp_path / ".history"
+    history.mkdir()
+    board.write_text("S-" + "9" * 5000, encoding="utf-8")
+    log.write_text("# LOG\n", encoding="utf-8")
+    assert IdSequence(history, board, log).reserve() == ["S-1"]
 
 
 def test_trash_two_deletes_same_second_independent(tmp_path):

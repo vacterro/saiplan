@@ -23,7 +23,7 @@ from datetime import UTC
 from pathlib import Path
 
 from .logbook import append_event
-from .persistence import atomic_write
+from .persistence import BoardStore, atomic_write, validate_snapshot
 
 _INVALID_CHARS = re.compile(r"[^A-Za-z0-9_.\- ]")
 _WIN_DEVICES = {
@@ -79,85 +79,117 @@ def new_plan_id(name: str) -> str:
 
 
 @dataclass
+class PlanNode:
+    kind: str
+    raw: str
+    name: str = ""
+
+
+@dataclass
 class PlanDoc:
-    """Structured PLAN.md model. `other` preserves every block the writer does
-    not own (unknown headings, free text) so a human edit never gets eaten."""
+    """Ordered PLAN.md model; only owned nodes change during updates."""
 
     name: str = ""
     created: str = ""
     sections: dict[str, str] = field(default_factory=lambda: {s: "" for s in KNOWN_SECTIONS})
-    other: list[str] = field(default_factory=list)  # preserved raw blocks
+    nodes: list[PlanNode] = field(default_factory=list)
+    original_name: str = ""
+    original_created: str = ""
+    original_sections: dict[str, str] = field(default_factory=dict)
 
     def render(self) -> str:
-        out = []
+        out: list[str] = []
         title_seen = created_seen = False
-        for block in self.other:
-            if block.startswith("# ") and not title_seen:
-                out.append(f"# {self.name}" if self.name else block)
+        section_seen: set[str] = set()
+        for node in self.nodes:
+            ending = "\n" if node.raw.endswith("\n") else ""
+            if node.kind == "title" and not title_seen:
+                out.append(
+                    node.raw if self.name == self.original_name else f"# {self.name}{ending}"
+                )
                 title_seen = True
-                continue
-            if block.startswith("created:") and not created_seen:
-                out.append(f"created: {self.created}" if self.created else block)
+            elif node.kind == "created" and not created_seen:
+                out.append(
+                    node.raw
+                    if self.created == self.original_created
+                    else f"created: {self.created}{ending}"
+                )
                 created_seen = True
-                continue
-            out.append(block)
+            elif node.kind == "known_section" and node.name not in section_seen:
+                value = self.sections.get(node.name, "")
+                if value == self.original_sections.get(node.name, ""):
+                    block = node.raw
+                else:
+                    block = f"## {node.name}\n"
+                    if value:
+                        block += value
+                        if not block.endswith("\n"):
+                            block += "\n"
+                out.append(block)
+                section_seen.add(node.name)
+            else:
+                out.append(node.raw)
         if not title_seen and self.name:
-            out.append(f"# {self.name}")
+            out.insert(0, f"# {self.name}\n")
         if not created_seen and self.created:
-            out.append(f"created: {self.created}")
-        if out and out[-1].strip():
-            out.append("")
-        # known sections, in canonical order, then any unknown sections kept
-        written = set()
-        body = []
+            insert_at = 1 if out else 0
+            out.insert(insert_at, f"\ncreated: {self.created}\n")
         for section in KNOWN_SECTIONS:
-            body.append(f"## {section}")
-            if self.sections.get(section):
-                body.append(self.sections[section].strip())
-            body.append("")
-            written.add(section)
-        # unknown sections live in self.other; emit them after known ones
-        return "\n".join(out + body).rstrip() + "\n"
-
-
-def _split_blocks(text: str) -> list[str]:
-    """Group raw text into blocks by top-level heading boundaries."""
-    lines = text.splitlines()
-    blocks: list[str] = []
-    current: list[str] = []
-    for line in lines:
-        if line.startswith(("# ", "## ")) and current:
-            blocks.append("\n".join(current).rstrip())
-            current = []
-        current.append(line)
-    if current:
-        blocks.append("\n".join(current).rstrip())
-    return [b for b in blocks if b]
+            if section not in section_seen:
+                if out and not out[-1].endswith("\n\n"):
+                    out.append("\n")
+                value = self.sections.get(section, "")
+                out.append(f"## {section}\n{value + chr(10) if value else ''}")
+        rendered = "".join(out)
+        return rendered if rendered.endswith("\n") else rendered + "\n"
 
 
 def read_plan_doc(path: Path) -> PlanDoc:
     doc = PlanDoc()
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_bytes().decode("utf-8")
     except OSError:
         return doc
-    blocks = _split_blocks(text)
-    for block in blocks:
-        lines = block.splitlines()
-        first = lines[0].strip() if lines else ""
-        if first.startswith("# ") and not doc.name:
-            doc.name = first[2:].strip()
+    lines = text.splitlines(keepends=True)
+    first_section = next(
+        (index for index, line in enumerate(lines) if line.startswith("## ")), len(lines)
+    )
+    boundaries = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("## ") or (index < first_section and line.startswith(("# ", "created:")))
+    ]
+    boundaries.append(len(lines))
+    cursor = 0
+    for position, start in enumerate(boundaries[:-1]):
+        if start > cursor:
+            doc.nodes.append(PlanNode("raw", "".join(lines[cursor:start])))
+        end = boundaries[position + 1]
+        line = lines[start]
+        if line.startswith("# "):
+            doc.name = line[2:].strip()
+            doc.nodes.append(PlanNode("title", line))
+            cursor = start + 1
             continue
-        if first.startswith("created:") and not doc.created:
-            doc.created = first[8:].strip()
+        if line.startswith("created:"):
+            doc.created = line[8:].strip()
+            doc.nodes.append(PlanNode("created", line))
+            cursor = start + 1
             continue
-        if first.startswith("## "):
-            heading = first[3:].strip()
-            body = "\n".join(lines[1:]).strip()
-            if heading in KNOWN_SECTIONS:
-                doc.sections[heading] = body
-                continue
-        doc.other.append(block)
+        raw = "".join(lines[start:end])
+        heading = line[3:].strip()
+        if heading in KNOWN_SECTIONS:
+            body = "".join(lines[start + 1 : end]).strip()
+            doc.sections[heading] = body
+            doc.nodes.append(PlanNode("known_section", raw, heading))
+        else:
+            doc.nodes.append(PlanNode("unknown_section", raw, heading))
+        cursor = end
+    if cursor < len(lines):
+        doc.nodes.append(PlanNode("raw", "".join(lines[cursor:])))
+    doc.original_name = doc.name
+    doc.original_created = doc.created
+    doc.original_sections = dict(doc.sections)
     return doc
 
 
@@ -197,6 +229,7 @@ class Plan:
         self.created = created
         self.constraints = constraints
         self.definition_of_done = definition_of_done
+        self.warnings: list[str] = []
 
     @property
     def board_path(self) -> Path:
@@ -309,7 +342,14 @@ class PlanStore:
                 (staging / sub).mkdir(parents=True, exist_ok=True)
             plan = Plan(plan_id, staging, name, objective, created, constraints, definition_of_done)
             atomic_write(staging / "PLAN.md", _render_plan_md(plan))
-            atomic_write(staging / "BOARD.md", "## DOING\n## TODO\n## DONE\n## BLOCKED\n")
+            initial_board = "## DOING\n## TODO\n## DONE\n## BLOCKED\n"
+            atomic_write(staging / "BOARD.md", initial_board)
+            board_store = BoardStore(staging / "BOARD.md", staging / ".history")
+            board_store.load()
+            board_store.save(initial_board)
+            snapshots = list((staging / ".history").glob("snapshot-*.board.md"))
+            if board_store.last_warnings or not any(validate_snapshot(path) for path in snapshots):
+                raise OSError("initial BOARD recovery snapshot could not be created")
             atomic_write(staging / "LOG.md", "# LOG\n")
             final = self.plans_dir / plan_id
             os.replace(staging, final)  # atomic, same filesystem
@@ -319,7 +359,10 @@ class PlanStore:
             shutil.rmtree(staging, ignore_errors=True)
             raise
         plan.directory = final
-        append_event(final / "LOG.md", "PLAN_CREATED", detail=f"plan '{name}'")
+        try:
+            append_event(final / "LOG.md", "PLAN_CREATED", detail=f"plan '{name}'")
+        except OSError as exc:
+            plan.warnings.append(f"plan created, but semantic LOG recording failed: {exc}")
         return plan
 
 

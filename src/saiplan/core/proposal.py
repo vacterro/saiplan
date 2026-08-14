@@ -97,7 +97,13 @@ def validate_proposal(proposal: PlanProposal) -> list[str]:
     return problems
 
 
-def apply_proposal(board: Board, proposal: PlanProposal, *, log_text: str = "") -> list[Ticket]:
+def apply_proposal(
+    board: Board,
+    proposal: PlanProposal,
+    *,
+    log_text: str = "",
+    ticket_ids: list[str] | None = None,
+) -> list[Ticket]:
     """Create the proposal's tickets on `board` in TODO (I2).
 
     Only called AFTER a human accepts. Task titles map to real S-ids; the
@@ -106,9 +112,11 @@ def apply_proposal(board: Board, proposal: PlanProposal, *, log_text: str = "") 
     """
     if validate_proposal(proposal):
         raise ValueError("cannot apply an invalid PlanProposal; fix structure first")
+    if ticket_ids is not None and len(ticket_ids) != len(proposal.tasks):
+        raise ValueError("ticket ID reservation does not match proposal task count")
     title_to_id: dict[str, str] = {}
     created: list[Ticket] = []
-    for task in proposal.tasks:
+    for index, task in enumerate(proposal.tasks):
         fields = []
         if task.done_when:
             fields.append(("done-when", task.done_when))
@@ -117,7 +125,12 @@ def apply_proposal(board: Board, proposal: PlanProposal, *, log_text: str = "") 
         if task.priority and task.priority != "normal":
             fields.append(("priority", task.priority))
         ticket = create_ticket(
-            board, task.title.strip(), log_text=log_text, fields=fields, status="TODO"
+            board,
+            task.title.strip(),
+            tid=ticket_ids[index] if ticket_ids is not None else None,
+            log_text=log_text,
+            fields=fields,
+            status="TODO",
         )
         title_to_id[task.title.strip()] = ticket.ticket_id
         created.append(ticket)

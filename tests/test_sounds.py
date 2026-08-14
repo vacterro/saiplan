@@ -3,6 +3,8 @@ missing file safety."""
 
 from pathlib import Path
 
+import pytest
+
 from saiplan.extras.sounds import (
     DEFAULT_EVENTS,
     KNOWN_EVENTS,
@@ -90,6 +92,24 @@ def test_registry_defaults_on_missing_entry(tmp_path):
     lib = SoundLibrary(tmp_path)
     reg = SoundRegistry(lib, None)
     assert reg.file_for("timer_finished") == tmp_path / "chime_bell_ding1.wav"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {"file": [], "enabled": True, "volume": 1.0},
+        {"file": None, "enabled": "yes", "volume": "banana"},
+        {"file": "x.wav", "enabled": 1, "volume": float("nan")},
+        {"file": "x.wav", "enabled": False, "volume": 99},
+    ],
+)
+def test_registry_malformed_payloads_use_safe_values(tmp_path, entry):
+    (tmp_path / "x.wav").write_bytes(b"RIFF")
+    reg = SoundRegistry(SoundLibrary(tmp_path), {"timer_finished": entry})
+    normalized = reg.events["timer_finished"]
+    assert isinstance(normalized["file"], str)
+    assert isinstance(normalized["enabled"], bool)
+    assert 0.0 <= normalized["volume"] <= 1.0
 
 
 def test_registry_events_reasonable_defaults():

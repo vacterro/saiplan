@@ -81,7 +81,14 @@ def create_ticket(
     return ticket
 
 
-def transition(board: Board, ticket_id: str, target: str, reason: str | None = None) -> Ticket:
+def transition(
+    board: Board,
+    ticket_id: str,
+    target: str,
+    reason: str | None = None,
+    *,
+    single_focus: bool = False,
+) -> Ticket:
     """Validate and apply one lifecycle edge. Raises TransitionRefused."""
     ticket = board.get(ticket_id)
     if ticket is None:
@@ -89,6 +96,8 @@ def transition(board: Board, ticket_id: str, target: str, reason: str | None = N
     src = ticket.status
 
     if target == DOING:
+        if src == DOING:
+            return ticket
         if src != TODO:
             raise TransitionRefused(f"start accepts only TODO, {ticket_id} is under {src}")
         unmet = [n for n in ticket.needs if board.get(n) is None or board.get(n).status != DONE]
@@ -96,9 +105,18 @@ def transition(board: Board, ticket_id: str, target: str, reason: str | None = N
             raise TransitionRefused(
                 f"{ticket_id} has unmet needs: {', '.join(unmet)}; finish those tickets first"
             )
+        if single_focus and any(t.ticket_id != ticket_id for t in board.sections[DOING]):
+            raise TransitionRefused(
+                "single focus is enabled; finish or stop the active ticket first"
+            )
     elif target == DONE:
         if src != DOING:
             raise TransitionRefused(f"done accepts only DOING, {ticket_id} is under {src}")
+        unmet = [n for n in ticket.needs if board.get(n) is None or board.get(n).status != DONE]
+        if unmet:
+            raise TransitionRefused(
+                f"{ticket_id} has unmet needs: {', '.join(unmet)}; finish those tickets first"
+            )
     elif target == BLOCKED:
         if src not in (TODO, DOING):
             raise TransitionRefused(f"block accepts only TODO/DOING, {ticket_id} is under {src}")

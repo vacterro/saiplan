@@ -114,6 +114,40 @@ def test_corrupt_timer_entry_skipped(tmp_path):
     assert engine.tick() == []
 
 
+@pytest.mark.parametrize("value", [[], 42, None, "text", True])
+def test_arbitrary_json_timer_values_never_break_startup(tmp_path, value):
+    p = tmp_path / "t.jsonl"
+    p.write_text(json.dumps(value) + "\n", encoding="utf-8")
+    assert TimerEngine(p).deadline == {}
+
+
+def test_invalid_utf8_timer_line_isolated(tmp_path):
+    p = tmp_path / "t.jsonl"
+    p.write_bytes(
+        b"\xff\n" + json.dumps({"kind": "deadline", "target_at": _iso(60)}).encode() + b"\n"
+    )
+    assert len(TimerEngine(p).deadline) == 1
+
+
+def test_huge_ticket_duration_isolated(tmp_path):
+    p = tmp_path / "TIMELOG.jsonl"
+    p.write_text(
+        json.dumps(
+            {
+                "kind": "ticket",
+                "session_id": "huge",
+                "ticket_id": "S-1",
+                "started_at": _iso(-60),
+                "ended_at": _iso(0),
+                "duration_s": 10**4000,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert TicketTimer(p).load() == []
+
+
 def test_stopwatch_pause_resume_reset():
     sw = Stopwatch()
     sw.start()
@@ -136,13 +170,16 @@ def test_pomodoro_phases_and_single_alarm():
     p.start_work()
     time.sleep(0.05)
     # tick until finish; alarm must fire exactly once
-    finished = [p.tick() for _ in range(5)]
-    assert finished.count(True) == 1
-    p.ack_alarm()
+    events = [p.tick() for _ in range(5)]
+    finished = [event for event in events if event is not None]
+    assert len(finished) == 1
+    assert finished[0].completed_phase == "work"
+    assert finished[0].next_phase == "short_break"
     assert p.phase == "short_break"
     time.sleep(0.05)
-    assert p.tick() is True
-    p.ack_alarm()
+    event = p.tick()
+    assert event.completed_phase == "short_break"
+    assert event.next_phase == "work"
     assert p.phase == "work"
 
 
@@ -155,6 +192,25 @@ def test_pomodoro_long_break_every_four():
         phases.append(p.phase)
     assert phases[3] == "long_break"
     assert phases[7] == "long_break"
+
+
+def test_pomodoro_auto_advances_multiple_cycles():
+    p = Pomodoro(work_s=0.001, short_s=0.001, long_s=0.001)
+    p.start_work()
+    events = []
+    for _ in range(8):
+        p._started_mono -= 1
+        events.append(p.tick())
+    assert [event.completed_phase for event in events] == [
+        "work",
+        "short_break",
+        "work",
+        "short_break",
+        "work",
+        "short_break",
+        "work",
+        "long_break",
+    ]
 
 
 def test_pomodoro_pause_holds_remaining():
@@ -213,6 +269,24 @@ def test_ticket_timer_persists_start_immediately(tmp_path):
     raw = p.read_text(encoding="utf-8")
     assert "S-004" in raw
     tt.stop_ticket("S-004")
+
+
+def test_ticket_timer_start_stop_are_transactional(tmp_path, monkeypatch):
+    tt = TicketTimer(tmp_path / "TIMELOG.jsonl")
+
+    def fail(_record):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(tt, "_append", fail)
+    with pytest.raises(OSError):
+        tt.start("S-1")
+    assert not tt.is_running("S-1")
+    monkeypatch.undo()
+    sid = tt.start("S-1")
+    monkeypatch.setattr(tt, "_append", fail)
+    with pytest.raises(OSError):
+        tt.stop(sid)
+    assert tt.is_running("S-1")
 
 
 def test_deadline_bad_target_refused(tmp_path):
@@ -283,6 +357,42 @@ def test_timer_save_is_atomic(tmp_path):
     assert list(tmp_path.glob("*.tmp-*")) == []
     lines = p.read_text(encoding="utf-8").splitlines()
     assert len([l for l in lines if l.strip()]) == 2
+
+
+def test_deadline_mutations_adopt_only_after_save(tmp_path, monkeypatch):
+    engine = TimerEngine(tmp_path / "t.jsonl")
+
+    def fail(_candidate=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(engine, "save", fail)
+    with pytest.raises(OSError):
+        engine.add_deadline(_iso(60), label="phantom")
+    assert engine.deadline == {}
+    monkeypatch.undo()
+    timer = engine.add_deadline(_iso(60), label="real")
+    original = engine.deadline[timer.tid].target_at
+    monkeypatch.setattr(engine, "save", fail)
+    with pytest.raises(OSError):
+        engine.snooze(timer.tid, 300)
+    assert engine.deadline[timer.tid].target_at == original
+    with pytest.raises(OSError):
+        engine.cancel(timer.tid)
+    assert timer.tid in engine.deadline
+
+
+def test_deadline_expiration_failure_keeps_timer_armed(tmp_path, monkeypatch):
+    engine = TimerEngine(tmp_path / "t.jsonl")
+    timer = engine.add_deadline(_iso(0), label="due")
+
+    def fail(_candidate=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(engine, "save", fail)
+    with pytest.raises(OSError):
+        engine.tick(now=time.time() + 1)
+    assert timer.tid in engine.deadline
+    assert timer.tid not in engine._fired
 
 
 def test_stopwatch_fractional_display():

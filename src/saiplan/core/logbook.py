@@ -20,6 +20,7 @@ EVENTS = frozenset(
         "TICKET_RESTORED",
         "PLAN_REVIEWED",
         "RECOVERY_USED",
+        "SNAPSHOT_RESTORED",
         "CONFLICT_DETECTED",
         "BATCH_CREATED",
     }

@@ -27,6 +27,8 @@ Diagnostics are split into two channels:
 
 from __future__ import annotations
 
+import datetime
+import json
 import re
 
 from .model import (
@@ -34,11 +36,13 @@ from .model import (
     DOING,
     DONE,
     KNOWN_FIELDS,
+    PRIORITY_ORDER,
     SECTION_ORDER,
     STATUS_CHECKBOX,
     TODO,
     Board,
     Ticket,
+    parse_needs,
 )
 
 REQUIRED_HEADINGS = tuple(f"## {s}" for s in SECTION_ORDER)
@@ -127,6 +131,8 @@ def parse_board_detailed(text: str) -> tuple[Board, list[str], list[str]]:
             heading = line
             current = heading
             heading_seen[heading] = heading_seen.get(heading, 0) + 1
+            if heading not in REQUIRED_HEADINGS:
+                errors.append(f"BOARD.md:{line_no}: unknown level-2 heading {heading!r}")
             continue
         if current is None:
             errors.append(f"BOARD.md:{line_no}: content before any section heading")
@@ -175,6 +181,78 @@ def board_text_is_strictly_valid(text: str) -> bool:
         return False
     _board, errors, _warnings = parse_board_detailed(text)
     return not errors
+
+
+def validate_board_semantics(board: Board, *, single_focus: bool = False) -> list[str]:
+    """Validate representable BOARD state independently from Markdown syntax."""
+    errors: list[str] = []
+    tickets = board.all_tickets()
+    ids = {ticket.ticket_id for ticket in tickets}
+    graph: dict[str, list[str]] = {}
+    for ticket in tickets:
+        needs, needs_error = parse_needs(ticket.get("needs"))
+        graph[ticket.ticket_id] = needs
+        if needs_error:
+            errors.append(f"{ticket.ticket_id}: {needs_error}")
+            continue
+        if ticket.ticket_id in needs:
+            errors.append(f"{ticket.ticket_id}: self-dependency is not allowed")
+        for need in needs:
+            if need not in ids:
+                errors.append(f"{ticket.ticket_id}: dependency {need} does not exist")
+            elif ticket.status in (DOING, DONE) and board.get(need).status != DONE:
+                errors.append(
+                    f"{ticket.ticket_id}: {ticket.status} requires dependency {need} to be DONE"
+                )
+        blocked_by = ticket.get("blocked-by")
+        if ticket.status == BLOCKED and not blocked_by.strip():
+            errors.append(f"{ticket.ticket_id}: BLOCKED requires blocked-by")
+        if ticket.status != BLOCKED and blocked_by:
+            errors.append(f"{ticket.ticket_id}: blocked-by is only valid under BLOCKED")
+        priority = ticket.get("priority")
+        if priority and priority not in PRIORITY_ORDER:
+            errors.append(f"{ticket.ticket_id}: invalid priority {priority!r}")
+        due = ticket.get("due")
+        if due:
+            try:
+                datetime.date.fromisoformat(due)
+            except ValueError:
+                errors.append(f"{ticket.ticket_id}: invalid due date {due!r}")
+        checklist = ticket.get("checklist")
+        if checklist:
+            try:
+                items = json.loads(checklist)
+            except ValueError:
+                items = None
+            if not isinstance(items, list) or any(
+                not isinstance(item, dict)
+                or not isinstance(item.get("text"), str)
+                or not isinstance(item.get("done"), bool)
+                for item in items or []
+            ):
+                errors.append(
+                    f"{ticket.ticket_id}: checklist must be a JSON list of text/done items"
+                )
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def walk(ticket_id: str) -> bool:
+        if ticket_id in visiting:
+            return True
+        if ticket_id in visited:
+            return False
+        visiting.add(ticket_id)
+        cycle = any(need in graph and walk(need) for need in graph.get(ticket_id, []))
+        visiting.remove(ticket_id)
+        visited.add(ticket_id)
+        return cycle
+
+    if any(walk(ticket_id) for ticket_id in graph):
+        errors.append("dependency cycle detected")
+    if single_focus and len(board.sections[DOING]) > 1:
+        errors.append("single focus allows only one ticket in DOING")
+    return errors
 
 
 def render_board(board: Board) -> str:

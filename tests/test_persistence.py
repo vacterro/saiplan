@@ -20,6 +20,7 @@ from saiplan.core.persistence import (
     CorruptBoardError,
     ExternalEditError,
     atomic_write,
+    atomic_write_bytes,
     file_fingerprint,
     validate_snapshot,
 )
@@ -198,6 +199,42 @@ def test_recover_and_adopt_preserves_corrupt_primary(store):
     # disk / loaded_text / guard now agree on the restored state
     assert store.loaded_text == text
     assert not store.has_external_change()
+
+
+def test_invalid_utf8_primary_is_preserved_exactly(store):
+    store.save(render_board(build_board("TODO S-001 Golden")))
+    damaged = b"\xff\xfe\x00BROKEN\r\n"
+    atomic_write_bytes(store.board_path, damaged)
+    with pytest.raises(CorruptBoardError):
+        store.load()
+    text = store.recover_and_adopt()
+    assert "S-001" in text
+    preserved = list(store.history_dir.glob("corrupt-*.board.md"))
+    assert len(preserved) == 1
+    assert preserved[0].read_bytes() == damaged
+
+
+def test_recovery_refuses_to_replace_when_forensic_copy_fails(store, monkeypatch):
+    store.save(render_board(build_board("TODO S-001 Golden")))
+    damaged = b"not a board"
+    atomic_write_bytes(store.board_path, damaged)
+
+    def fail(_raw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "preserve_raw_corrupt", fail)
+    with pytest.raises(CorruptBoardError, match="recovery refused"):
+        store.recover_and_adopt()
+    assert store.board_path.read_bytes() == damaged
+
+
+def test_forensic_names_do_not_collide_with_frozen_clock(store, monkeypatch):
+    monkeypatch.setattr("saiplan.core.persistence.time.strftime", lambda *_args: "SAME")
+    one = store.preserve_raw_conflict(b"one", "external")
+    two = store.preserve_raw_conflict(b"two", "external")
+    assert one != two
+    assert one.read_bytes() == b"one"
+    assert two.read_bytes() == b"two"
 
 
 def test_recover_and_adopt_missing_board_with_snapshot(store):

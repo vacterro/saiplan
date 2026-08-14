@@ -8,6 +8,7 @@ and offers an alternate writable location instead of scattering data.
 
 from __future__ import annotations
 
+import atexit
 import logging
 import os
 import sys
@@ -15,7 +16,7 @@ import time
 
 from .applog import setup_logging
 from .core.config import Config
-from .extras.timers import TimerEngine
+from .extras.timers import NullTimerEngine, TimerEngine
 from .platform import paths
 from .platform.single_instance import (
     SingleInstanceMutex,
@@ -83,6 +84,7 @@ def main() -> int:
         )
         return 1
     # mutex held: this process is the writer. It lives for the whole main().
+    atexit.register(mutex.release)
 
     # CI/smoke hook: auto-quit after a fixed delay. Implemented as a repeating
     # watchdog so it also fires while a modal dialog's nested event loop runs
@@ -123,7 +125,11 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         logger.error("theme registry failed: %s", e)
         theme_registry = None
-    timer_engine = TimerEngine(layout["data"] / "timers.jsonl")
+    try:
+        timer_engine = TimerEngine(layout["data"] / "timers.jsonl")
+    except Exception:
+        logger.exception("deadline timer subsystem disabled")
+        timer_engine = NullTimerEngine()
 
     app_ctx = App(layout, config, theme_registry, timer_engine)
 
@@ -131,16 +137,16 @@ def main() -> int:
     write_nonce(layout, handoff_nonce)
     server = QLocalServer(app)
     server.removeServer("Saiplan")
-    server.listen("Saiplan")
+    if not server.listen("Saiplan"):
+        logger.error("local IPC server failed to listen: %s", server.errorString())
     window = None
 
-    def _on_connection():
-        conn = server.nextPendingConnection()
-        if conn is None:
+    def _read_connection(conn, buffer):
+        buffer.extend(bytes(conn.readAll()))
+        expected = handoff_nonce.encode()
+        if len(buffer) < len(expected):
             return
-        conn.waitForReadyRead(2000)
-        data = bytes(conn.readAll())
-        if data == handoff_nonce.encode():
+        if bytes(buffer) == expected:
             conn.write(_ACK_BYTES)
             conn.flush()
             if window is not None:
@@ -148,6 +154,16 @@ def main() -> int:
                 window.activateWindow()
         conn.disconnectFromServer()
         conn.deleteLater()
+
+    def _on_connection():
+        conn = server.nextPendingConnection()
+        if conn is None:
+            return
+        buffer = bytearray()
+        conn.readyRead.connect(lambda c=conn, b=buffer: _read_connection(c, b))
+        conn.disconnected.connect(conn.deleteLater)
+        if conn.bytesAvailable():
+            _read_connection(conn, buffer)
 
     server.newConnection.connect(_on_connection)
 
@@ -161,8 +177,12 @@ def main() -> int:
 
     window.show()
     rc = app.exec()
-    app_ctx.timer_engine.save()
-    mutex.release()
+    try:
+        app_ctx.timer_engine.save()
+    except Exception:
+        logger.exception("timer shutdown save failed")
+    finally:
+        mutex.release()
     logger.info("SAIPLAN exit rc=%s", rc)
     return rc
 

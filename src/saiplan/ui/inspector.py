@@ -7,6 +7,7 @@ persisted immediately (no Save button in the product's vocabulary).
 from __future__ import annotations
 
 import json
+import uuid
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -26,6 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.model import BLOCKED, DOING, DONE, TODO, Ticket
+from ..core.persistence import atomic_write
 
 SINGLE_LINE_FIELDS = (
     ("due", "due", "Due"),
@@ -38,6 +40,7 @@ SINGLE_LINE_FIELDS = (
 
 class Inspector(QWidget):
     board_changed = pyqtSignal()
+    save_failed = pyqtSignal(str)
 
     def __init__(
         self, controller, ticket_timer=None, on_timer_toggle=None, on_notes=None, parent=None
@@ -49,6 +52,12 @@ class Inspector(QWidget):
         self.on_notes = on_notes
         self.ticket_id: str | None = None
         self._busy = False
+        self._dirty_ticket_id: str | None = None
+        self._pending_details = ""
+        self._revision = 0
+        self._failed_values: dict[tuple[str, str, str], str] = {}
+        self._skip_retry_once = False
+        self._conflict_draft_path = None
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(400)
@@ -95,8 +104,11 @@ class Inspector(QWidget):
         layout.addWidget(details_label)
         self.details_edit = QPlainTextEdit()
         self.details_edit.setMaximumHeight(90)
-        self.details_edit.textChanged.connect(self._debounce.start)
+        self.details_edit.textChanged.connect(self._details_changed)
         layout.addWidget(self.details_edit)
+        self.unsaved_label = QLabel("")
+        self.unsaved_label.setObjectName("warning")
+        layout.addWidget(self.unsaved_label)
 
         checklist_label = QLabel("Checklist")
         checklist_label.setObjectName("sectionTitle")
@@ -143,10 +155,37 @@ class Inspector(QWidget):
         self.setMinimumWidth(240)
 
     # -- display ------------------------------------------------------
-    def set_ticket(self, ticket: Ticket | None) -> None:
+    def set_ticket(self, ticket: Ticket | None) -> bool:
+        next_id = ticket.ticket_id if ticket else None
+        previous_id = self.ticket_id
+        if self._skip_retry_once:
+            self._skip_retry_once = False
+        elif self._dirty_ticket_id and not self.flush_pending():
+            return False
         self._busy = True
-        self.ticket_id = ticket.ticket_id if ticket else None
+        self.ticket_id = next_id
         if ticket is None:
+            if self._conflict_draft_path is not None:
+                preserved_ticket = previous_id
+                self.title_edit.setText("")
+                self.status_label.setText(
+                    f"Ticket removed externally - draft preserved in {self._conflict_draft_path.name}"
+                )
+                for edit in self.field_edits.values():
+                    edit.clear()
+                self.priority_combo.setCurrentIndex(0)
+                draft = ""
+                if preserved_ticket:
+                    draft = self._draft(preserved_ticket, "details", "")
+                    for key in list(self._failed_values):
+                        if key[0] == self._plan_id() and key[1] == preserved_ticket:
+                            self._failed_values.pop(key, None)
+                self.details_edit.setPlainText(draft)
+                self._fill_checklist("")
+                self.unsaved_label.setText(f"Draft safely preserved: {self._conflict_draft_path}")
+                self._conflict_draft_path = None
+                self._busy = False
+                return True
             self.title_edit.clear()
             self.status_label.setText("No ticket selected")
             for edit in self.field_edits.values():
@@ -165,15 +204,18 @@ class Inspector(QWidget):
                 b.setEnabled(False)
             self.timer_label.setText("")
             self._busy = False
-            return
-        self.title_edit.setText(ticket.title)
+            return True
+        self.title_edit.setText(self._draft(ticket.ticket_id, "title", ticket.title))
         self.status_label.setText(f"{ticket.ticket_id}  ·  {ticket.status}")
         for key, edit in self.field_edits.items():
-            edit.setText(ticket.get(key))
-        idx = self.priority_combo.findText(ticket.get("priority"))
+            edit.setText(self._draft(ticket.ticket_id, key, ticket.get(key)))
+        priority = self._draft(ticket.ticket_id, "priority", ticket.get("priority"))
+        idx = self.priority_combo.findText(priority)
         self.priority_combo.setCurrentIndex(max(0, idx))
-        self.details_edit.setPlainText(ticket.get("details"))
-        self._fill_checklist(ticket.get("checklist"))
+        self.details_edit.setPlainText(
+            self._draft(ticket.ticket_id, "details", ticket.get("details"))
+        )
+        self._fill_checklist(self._draft(ticket.ticket_id, "checklist", ticket.get("checklist")))
         self.timer_button.setEnabled(True)
         self._refresh_timer_state()
         # enable/disable per status
@@ -184,6 +226,8 @@ class Inspector(QWidget):
         self.btn_reopen.setEnabled(status in (BLOCKED, DONE))
         self.btn_delete.setEnabled(True)
         self._busy = False
+        self._update_unsaved_label()
+        return True
 
     def _fill_checklist(self, raw: str) -> None:
         self.checklist.clear()
@@ -211,13 +255,139 @@ class Inspector(QWidget):
             self.timer_label.setText(self.ticket_timer.started_at(self.ticket_id) or "")
 
     # -- saves --------------------------------------------------------
+    def _plan_id(self) -> str:
+        return self.controller.plan.plan_id if self.controller is not None else ""
+
+    def _draft(self, ticket_id: str, field: str, persisted: str) -> str:
+        return self._failed_values.get((self._plan_id(), ticket_id, field), persisted)
+
+    def _mark_failed(self, ticket_id: str, field: str, value: str, error: Exception) -> None:
+        self._failed_values[(self._plan_id(), ticket_id, field)] = value
+        self._update_unsaved_label()
+        self.save_failed.emit(f"Could not save {field}: {error}")
+
+    def _mark_saved(self, ticket_id: str, field: str) -> None:
+        self._failed_values.pop((self._plan_id(), ticket_id, field), None)
+        self._update_unsaved_label()
+
+    def _update_unsaved_label(self) -> None:
+        dirty = bool(self._dirty_ticket_id or self._failed_values)
+        self.unsaved_label.setText("Unsaved changes - retry before leaving" if dirty else "")
+
+    def _details_changed(self) -> None:
+        if self._busy or not self.ticket_id:
+            return
+        self._revision += 1
+        self._dirty_ticket_id = self.ticket_id
+        self._pending_details = self.details_edit.toPlainText()
+        self._update_unsaved_label()
+        self._debounce.start()
+
+    def flush_pending(self) -> bool:
+        if self._dirty_ticket_id:
+            self._debounce.stop()
+            ticket_id = self._dirty_ticket_id
+            pending = self._pending_details
+            value = pending.strip().replace("\n", " ")
+            try:
+                self.controller.edit_field(ticket_id, "details", value)
+            except Exception as error:  # noqa: BLE001 - human draft must survive every save failure
+                self._mark_failed(ticket_id, "details", pending, error)
+                return False
+            self._dirty_ticket_id = None
+            self._pending_details = ""
+            self._mark_saved(ticket_id, "details")
+        plan_id = self._plan_id()
+        pending_fields = [
+            (ticket_id, field, value)
+            for (draft_plan, ticket_id, field), value in self._failed_values.items()
+            if draft_plan == plan_id
+        ]
+        for ticket_id, field, value in pending_fields:
+            if ticket_id == self.ticket_id:
+                if field == "title":
+                    value = self.title_edit.text()
+                elif field in self.field_edits:
+                    value = self.field_edits[field].text()
+                elif field == "priority":
+                    value = self.priority_combo.currentText()
+                elif field == "checklist":
+                    value = self._serialize_checklist()
+                elif field == "details":
+                    value = self.details_edit.toPlainText()
+            persisted = value.strip().replace("\n", " ") if field == "details" else value
+            try:
+                self.controller.edit_field(ticket_id, field, persisted)
+            except Exception as error:  # noqa: BLE001 - human draft must survive every save failure
+                self.save_failed.emit(f"Could not save {field}: {error}")
+                return False
+            self._mark_saved(ticket_id, field)
+        return True
+
+    def preserve_pending_for_conflict(self) -> bool:
+        """Keep visible draft without writing it over chosen conflict authority."""
+        if self._dirty_ticket_id:
+            self._debounce.stop()
+            self._failed_values[(self._plan_id(), self._dirty_ticket_id, "details")] = (
+                self._pending_details
+            )
+            self._dirty_ticket_id = None
+            self._pending_details = ""
+        plan_id = self._plan_id()
+        drafts = {
+            f"{ticket_id}:{field}": value
+            for (draft_plan, ticket_id, field), value in self._failed_values.items()
+            if draft_plan == plan_id
+        }
+        if drafts:
+            target = self.controller.plan.history_dir / (
+                f"unsaved-draft-{self.ticket_id}-{uuid.uuid4().hex[:8]}.json"
+            )
+            try:
+                atomic_write(
+                    target,
+                    json.dumps(
+                        {
+                            "plan_id": plan_id,
+                            "selected_ticket_id": self.ticket_id,
+                            "revision": self._revision,
+                            "fields": drafts,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    + "\n",
+                )
+            except OSError as error:
+                self.save_failed.emit(
+                    f"Could not preserve draft before conflict resolution: {error}"
+                )
+                return False
+            self._conflict_draft_path = target
+        self._skip_retry_once = True
+        self._update_unsaved_label()
+        return True
+
+    def reconcile_after_conflict(self) -> None:
+        """Keep surviving drafts; orphan drafts remain in forensic JSON."""
+        plan_id = self._plan_id()
+        existing = {ticket.ticket_id for ticket in self.controller.board.all_tickets()}
+        for key in list(self._failed_values):
+            if key[0] == plan_id and key[1] not in existing:
+                self._failed_values.pop(key, None)
+
+    def clear_preserved_conflict_draft(self) -> None:
+        self._conflict_draft_path = None
+
     def _save_title(self) -> None:
         if self._busy or not self.ticket_id:
             return
         try:
             self.controller.edit_field(self.ticket_id, "title", self.title_edit.text())
+            self._mark_saved(self.ticket_id, "title")
             self.board_changed.emit()
         except Exception as e:  # noqa: BLE001
+            self._mark_failed(self.ticket_id, "title", self.title_edit.text(), e)
             QMessageBox.warning(self, "SAIPLAN", str(e))
 
     def _save_field(self, key: str, edit: QLineEdit) -> None:
@@ -225,8 +395,10 @@ class Inspector(QWidget):
             return
         try:
             self.controller.edit_field(self.ticket_id, key, edit.text().strip())
+            self._mark_saved(self.ticket_id, key)
             self.board_changed.emit()
         except Exception as e:  # noqa: BLE001
+            self._mark_failed(self.ticket_id, key, edit.text(), e)
             QMessageBox.warning(self, "SAIPLAN", str(e))
 
     def _save_priority(self) -> None:
@@ -236,19 +408,15 @@ class Inspector(QWidget):
             self.controller.edit_field(
                 self.ticket_id, "priority", self.priority_combo.currentText()
             )
+            self._mark_saved(self.ticket_id, "priority")
             self.board_changed.emit()
         except Exception as e:  # noqa: BLE001
+            self._mark_failed(self.ticket_id, "priority", self.priority_combo.currentText(), e)
             QMessageBox.warning(self, "SAIPLAN", str(e))
 
     def _save_details(self) -> None:
-        if self._busy or not self.ticket_id:
-            return
-        value = self.details_edit.toPlainText().strip().replace("\n", " ")
-        try:
-            self.controller.edit_field(self.ticket_id, "details", value)
+        if self.flush_pending():
             self.board_changed.emit()
-        except Exception as e:  # noqa: BLE001
-            self._log_save_error(e)
 
     def _serialize_checklist(self) -> str:
         out = []
@@ -281,13 +449,16 @@ class Inspector(QWidget):
             return
         try:
             self.controller.edit_field(self.ticket_id, "checklist", self._serialize_checklist())
+            self._mark_saved(self.ticket_id, "checklist")
             self.board_changed.emit()
         except Exception as e:  # noqa: BLE001
-            self._log_save_error(e)
+            self._mark_failed(self.ticket_id, "checklist", self._serialize_checklist(), e)
 
     # -- actions ------------------------------------------------------
     def _transition(self, target: str, needs_reason: bool | None) -> None:
         if not self.ticket_id:
+            return
+        if not self.flush_pending():
             return
         reason = None
         if needs_reason:
@@ -303,6 +474,8 @@ class Inspector(QWidget):
 
     def _delete(self) -> None:
         if not self.ticket_id:
+            return
+        if not self.flush_pending():
             return
         ticket = self.controller.board.get(self.ticket_id)
         if ticket is None:
@@ -330,12 +503,6 @@ class Inspector(QWidget):
     def _open_notes(self) -> None:
         if self.ticket_id and self.on_notes:
             self.on_notes(self.ticket_id)
-
-    @staticmethod
-    def _log_save_error(error: Exception) -> None:
-        import logging
-
-        logging.getLogger("saiplan").debug("inspector autosave failed: %s", error)
 
     def after_board_change(self) -> None:
         """Re-sync the inspector when the board changed elsewhere."""

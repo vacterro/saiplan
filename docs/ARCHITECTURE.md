@@ -38,7 +38,7 @@ SAIPLAN/
         notes/           per-plan notes (markdown)
         attachments/
         .history/        undo log + rotating board snapshots
-        .trash/          deleted tickets/attachments, recoverable
+        .history/trash.jsonl   deleted ticket records, recoverable
   themes/                Wintage 21-token JSON packs (16 shipped)
   sounds/                full FastPrompter library as assets (414 wav)
   logs/                  app debug/crash logs (separate from semantic LOG.md)
@@ -99,7 +99,7 @@ src/saiplan/
     single_instance.py  Windows named mutex + token IPC handoff
     hotkeys.py          RegisterHotKey (ctypes, layout-aware)
     paths.py            portable path resolution + writable probe
-  logging.py        rotating crash log under logs/
+  applog.py         rotating crash log under logs/
   main.py           entry point: logging → layout → single instance → window
 ```
 
@@ -135,7 +135,7 @@ Ticket line (SAIPEN grammar + human fields):
 - Field vocabulary is closed: structural `id, title, status`; optional human
   fields `priority, due, tags, needs, estimate, done-when, blocked-by, details,
   checklist, created, updated`. An unknown but well-formed `key: value` field
-  is a WARNING and is preserved byte-for-byte on re-render — never dropped.
+  is a WARNING and its value is preserved semantically; canonical rendering may normalize layout.
 - A board that parses with ANY structural error (malformed line, malformed
   field fragment, duplicate ID, duplicate single-valued field, missing/
   duplicate required heading, ticket under unknown heading, checkbox/section
@@ -207,7 +207,7 @@ silent empty reset.
   truncates redo.
 - Undo restores prior BOARD bytes for that op (or prior field value), redo
   re-applies. Ops persist across restart.
-- Delete → moves ticket line to `.trash/tickets.jsonl` + a `DELETED` marker in
+- Delete → appends ticket record to `.history/trash.jsonl` + a `DELETED` marker in
   BOARD? No — delete = remove line + trash record; restore re-inserts.
 
 ## Timers (extras, spec §11)
@@ -348,29 +348,29 @@ not implemented.
 ## Build & release (Windows portable)
 
 Portable folder = source layout already: `SAIPLAN.exe` next to `data/`,
-`themes/`, `sounds/`, `logs/`. Build with Nuitka (auto-provisions MinGW64 via
-`--assume-yes-for-downloads`):
+`themes/`, `sounds/`, `logs/`. Canonical pipeline (pinned deps, identity
+gate, manifest, smoke):
 
 ```powershell
-# from repo root, in a venv with `pip install -e .[build,dev]`
-python -m nuitka --standalone --windows-console-mode=disable `
-  --enable-plugin=pyqt6 --assume-yes-for-downloads `
-  --include-package=saiplan --output-dir=build main.py
-# copy to a portable folder next to the assets; rename main.exe -> SAIPLAN.exe
-New-Item -ItemType Directory -Force dist\SAIPLAN\data\plans
-Copy-Item build\main.dist\* dist\SAIPLAN\ -Recurse
-Rename-Item dist\SAIPLAN\main.exe dist\SAIPLAN\SAIPLAN.exe
-Copy-Item themes sounds dist\SAIPLAN\ -Recurse
+powershell -File bootstrap-build-env.ps1       # pinned venv, once
+powershell -File build_windows.ps1             # Nuitka + identity + smoke
+powershell -File scripts/package_source.ps1    # clean source zip
+powershell -File scripts/package_portable.ps1  # portable zip + manifest
 ```
 
-`main.py` at the repo root is a thin shim (`from saiplan.main import main`):
-Nuitka compiles the entry as top-level `__main__`, where package-relative
-imports would break — the shim keeps them working in the frozen exe.
+Underneath, Nuitka (auto-provisions MinGW64 via
+`--assume-yes-for-downloads`) compiles the root `main.py` shim
+(`from saiplan.main import main`) into a standalone folder; package-relative
+imports would break under a top-level `__main__` without the shim.
+`build_windows.ps1` refuses a dirty tracked worktree, pins Nuitka 4.1.3,
+hashes the source before/after the compile (artifact rejected if it changed),
+writes `BUILD-SOURCE.sha256` + `MANIFEST.sha256` and runs an offscreen smoke
+with the frozen exe.
 
 Sound assets stay OUTSIDE the executable on purpose (spec §10): the dist
 already carries `sounds/` beside the exe, and `data/` moves with the folder
 (I14). Do not bundle 400 wav files into the binary.
 
-Pre-release gate: `pytest -q` green (150+ tests incl. subprocess entry smoke),
+Pre-release gate: `pytest -q` green (including explicit Qt/subprocess lanes),
 `ruff check src tests` clean, and the §24 checklist manually exercised on a
 copy of the portable folder.

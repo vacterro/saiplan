@@ -12,6 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 pytest.importorskip("PyQt6")
+pytestmark = pytest.mark.qt
 
 from PyQt6.QtWidgets import QApplication
 
@@ -131,6 +132,54 @@ def test_inspector_shows_selected_ticket(app_ctx):
     win.close()
 
 
+def test_details_flush_before_fast_ticket_switch(app_ctx):
+    win = _window(app_ctx)
+    plan = app_ctx.plan_store.create("Draft switch")
+    win._open_plan(plan)
+    first = app_ctx.controller.create_ticket("First")
+    second = app_ctx.controller.create_ticket("Second")
+    win._on_activate(first.ticket_id)
+    win.inspector.details_edit.setPlainText("draft survives")
+    win._on_activate(second.ticket_id)
+    assert app_ctx.controller.board.get(first.ticket_id).get("details") == "draft survives"
+    assert win.inspector.ticket_id == second.ticket_id
+    win.close()
+
+
+def test_failed_details_save_preserves_visible_dirty_draft(app_ctx, monkeypatch):
+    win = _window(app_ctx)
+    plan = app_ctx.plan_store.create("Draft failure")
+    win._open_plan(plan)
+    first = app_ctx.controller.create_ticket("First")
+    second = app_ctx.controller.create_ticket("Second")
+    win._on_activate(first.ticket_id)
+    win.inspector.details_edit.setPlainText("must remain visible")
+
+    def fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(app_ctx.controller, "edit_field", fail)
+    win._on_activate(second.ticket_id)
+    assert win.inspector.ticket_id == first.ticket_id
+    assert win.inspector.details_edit.toPlainText() == "must remain visible"
+    assert "Unsaved changes" in win.inspector.unsaved_label.text()
+    monkeypatch.undo()
+    assert win.inspector.flush_pending()
+    win.close()
+
+
+def test_programmatic_ticket_refresh_does_not_create_details_draft(app_ctx):
+    win = _window(app_ctx)
+    plan = app_ctx.plan_store.create("No phantom draft")
+    win._open_plan(plan)
+    ticket = app_ctx.controller.create_ticket("Ticket")
+    win._on_activate(ticket.ticket_id)
+    win._refresh()
+    assert win.inspector._dirty_ticket_id is None
+    assert win.inspector.unsaved_label.text() == ""
+    win.close()
+
+
 def test_trash_and_restore_ui(app_ctx):
     win = _window(app_ctx)
     plan = app_ctx.plan_store.create("Trash Plan")
@@ -140,6 +189,80 @@ def test_trash_and_restore_ui(app_ctx):
     assert app_ctx.controller.board.get(t.ticket_id) is None
     app_ctx.controller.restore_ticket(t.ticket_id)
     assert app_ctx.controller.board.get(t.ticket_id) is not None
+    win.close()
+
+
+def test_export_plan_handler_writes_bundle(app_ctx, monkeypatch):
+    win = _window(app_ctx)
+    plan = app_ctx.plan_store.create("Portable Plan")
+    win._open_plan(plan)
+    win._load_plans()  # the export action resolves plan_id against the list
+    app_ctx.controller.create_ticket("Alpha")
+    bundle = app_ctx.layout["data"] / "portable.saiplan"
+    monkeypatch.setattr(
+        "PyQt6.QtWidgets.QFileDialog.getSaveFileName",
+        lambda *a, **k: (str(bundle), "SAIPLAN bundle (*.saiplan)"),
+    )
+    win._export_plan(plan.plan_id)
+    assert bundle.is_file()
+    from saiplan.core.bundle import import_plan
+
+    # the original id is taken here (never clobbers) — import into a fresh root
+    fresh_root = app_ctx.layout["data"] / "plans-imported"
+    imported = import_plan(fresh_root, bundle)
+    assert imported.plan_id == plan.plan_id
+    win.close()
+
+
+def test_import_plan_handler_opens_imported_plan(app_ctx, monkeypatch):
+    win = _window(app_ctx)
+    plan = app_ctx.plan_store.create("Importable")
+    bundle = app_ctx.layout["data"] / "importable.saiplan"
+    from saiplan.core.bundle import export_plan
+
+    export_plan(plan, bundle)
+    import shutil
+
+    shutil.rmtree(plan.directory)  # id must be free for import (never clobbers)
+    monkeypatch.setattr(
+        "PyQt6.QtWidgets.QFileDialog.getOpenFileName",
+        lambda *a, **k: (str(bundle), "SAIPLAN bundle (*.saiplan)"),
+    )
+    win._import_plan()
+    assert app_ctx.controller.plan.plan_id == plan.plan_id
+    win.close()
+
+
+def test_recovery_dialog_lists_and_previews(app_ctx):
+    win = _window(app_ctx)
+    plan = app_ctx.plan_store.create("Recovery Plan")
+    win._open_plan(plan)
+    controller = app_ctx.controller
+    controller.create_ticket("Alpha")
+    controller.create_ticket("Beta")
+    from saiplan.ui.dialogs import RecoveryDialog
+
+    dialog = RecoveryDialog(controller)
+    assert dialog.list_widget.count() >= 1
+    # newest artifact is a valid snapshot: preview populated, restore enabled
+    dialog.list_widget.setCurrentRow(0)
+    assert dialog.preview.toPlainText()
+    assert dialog.restore_btn.isEnabled()
+    # a forensic corrupt copy appears and is view-only (restore disabled)
+    controller.store.preserve_raw_corrupt(b"\xff\xfe raw corrupt")
+    dialog.artifacts = controller.recovery_artifacts()
+    dialog._populate()
+    assert dialog.list_widget.count() >= 2
+    dialog.list_widget.setCurrentRow(0)  # newest artifact is the corrupt copy
+    assert not dialog.restore_btn.isEnabled()
+    # selecting a valid snapshot re-enables restore
+    dialog.list_widget.setCurrentRow(1)
+    assert dialog.restore_btn.isEnabled()
+    # view-only rows are disabled (flags cleared, not a QWidget)
+    from PyQt6.QtCore import Qt as _Qt
+
+    assert not (dialog.list_widget.item(0).flags() & _Qt.ItemFlag.ItemIsEnabled)
+    dialog.deleteLater()
     win.close()
 
 

@@ -16,6 +16,14 @@ from ..core.persistence import atomic_write
 
 LINK_RE = re.compile(r"\[\[([ST]-\d+)\]\]")
 _PATH_UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_DEVICES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
 
 
 def safe_note_name(name: str) -> str:
@@ -23,7 +31,10 @@ def safe_note_name(name: str) -> str:
     name = unicodedata.normalize("NFC", name or "").strip()
     name = _PATH_UNSAFE.sub("_", name)
     name = re.sub(r"\s+", " ", name).strip(" ._")
-    return name or "note"
+    name = name or "note"
+    if name.split(".")[0].lower() in _DEVICES:
+        name = f"note-{name}"
+    return name
 
 
 def note_path(plan, name: str) -> Path:
@@ -38,7 +49,7 @@ def list_notes(plan) -> list[Path]:
 def read_note(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return ""
 
 
@@ -55,7 +66,7 @@ def ticket_links(text: str) -> list[str]:
 
 def backlinks(plan, ticket_id: str) -> list[Path]:
     """Notes referencing the ticket (via [[S-001]])."""
-    return [p for p in list_notes(plan) if ticket_id in read_note(p)]
+    return [p for p in list_notes(plan) if ticket_id in ticket_links(read_note(p))]
 
 
 def note_search(plan, query: str) -> list[Path]:

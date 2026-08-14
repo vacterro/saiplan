@@ -4,18 +4,18 @@ version = "0.1.1"
 description = "SAIPLAN - lightweight portable Windows planner, SAIPEN-style"
 requires-python = ">=3.11"
 dependencies = [
-    "PyQt6>=6.8.0",
+    "PyQt6==6.11.0",
 ]
 
 [project.optional-dependencies]
-build = ["nuitka>=4.1.2"]
-dev = ["pytest>=8.4.2", "ruff>=0.16.0"]
+build = ["nuitka==4.1.3", "zstandard==0.25.0"]
+dev = ["pytest==8.4.2", "ruff==0.16.0"]
 
 [project.scripts]
 saiplan = "saiplan.main:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
@@ -25,6 +25,11 @@ packages = ["src/saiplan"]
 testpaths = ["tests"]
 markers = [
     "slow: long-running subprocess smoke tests (deselect with -m 'not slow')",
+    "windows: Windows-only behavior",
+    "qt: requires a real PyQt6 installation",
+    "integration: crosses process or application boundaries",
+    "build: exercises release build artifacts",
+    "subprocess: launches child processes",
 ]
 
 [tool.ruff]

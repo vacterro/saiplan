@@ -9,17 +9,26 @@ path, not a mocked replica.
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.subprocess,
+    pytest.mark.integration,
+    pytest.mark.qt,
+]
 
-@pytest.mark.slow
+
 def test_main_entrypoint_launches_and_exits(tmp_path):
     root = tmp_path / "SAIPLAN"
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["SAIPLAN_ROOT"] = str(root)
     env["SAIPLAN_AUTOQUIT_MS"] = "1200"
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(
         [sys.executable, "-m", "saiplan.main"],
         capture_output=True,
@@ -35,7 +44,6 @@ def test_main_entrypoint_launches_and_exits(tmp_path):
     assert (root / "data" / "config.json").exists()
 
 
-@pytest.mark.slow
 def test_main_entrypoint_readonly_data_fails_loudly(tmp_path):
     root = tmp_path / "SAIPLAN"
     root.mkdir()
@@ -43,6 +51,8 @@ def test_main_entrypoint_readonly_data_fails_loudly(tmp_path):
     env = dict(os.environ)
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["SAIPLAN_ROOT"] = str(root)
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(
         [sys.executable, "-m", "saiplan.main"],
         capture_output=True,

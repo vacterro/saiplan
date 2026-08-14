@@ -7,6 +7,8 @@ Everything derives from canonical files; there is no hidden index to go stale.
 from __future__ import annotations
 
 import datetime
+import json
+import math
 from datetime import UTC
 
 from ..core.logbook import read_log
@@ -18,13 +20,15 @@ def board_counts(controller) -> dict[str, int]:
 
 def status_totals(plan) -> dict[str, int]:
     """Ticket counts by status read straight off BOARD.md."""
-    from ..core.board import parse_board
+    from ..core.board import parse_board_detailed, validate_board_semantics
 
     try:
         text = plan.board_path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return {}
-    board, _errors = parse_board(text)
+    board, errors, _warnings = parse_board_detailed(text)
+    if errors or validate_board_semantics(board):
+        return {}
     return board.counts()
 
 
@@ -37,45 +41,49 @@ def activity_counts(plan) -> dict[str, int]:
     return out
 
 
-def time_spent(plan, ticket_id: str) -> float:
-    """Total seconds recorded in TIMELOG.jsonl for a ticket."""
-    total = 0.0
+def _closed_sessions(plan) -> list[dict]:
     try:
-        lines = plan.timelog_path.read_text(encoding="utf-8").splitlines()
+        lines = plan.timelog_path.read_bytes().splitlines()
     except OSError:
-        return 0.0
-    import json
-
-    for line in lines:
-        if not line.strip():
+        return []
+    sessions: dict[str, dict] = {}
+    for raw in lines:
+        if not raw.strip():
             continue
         try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
+            rec = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
             continue
-        if rec.get("kind") == "ticket" and rec.get("ticket_id") == ticket_id:
-            total += float(rec.get("duration_s", 0))
-    return total
+        if not isinstance(rec, dict) or rec.get("kind") != "ticket" or not rec.get("ended_at"):
+            continue
+        session_id = rec.get("session_id")
+        duration = rec.get("duration_s")
+        try:
+            duration_value = float(duration)
+        except (OverflowError, TypeError, ValueError):
+            continue
+        if (
+            not isinstance(session_id, str)
+            or isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or not math.isfinite(duration_value)
+            or duration_value < 0
+        ):
+            continue
+        sessions.setdefault(session_id, rec)
+    return list(sessions.values())
+
+
+def time_spent(plan, ticket_id: str) -> float:
+    return sum(
+        float(rec["duration_s"])
+        for rec in _closed_sessions(plan)
+        if rec.get("ticket_id") == ticket_id
+    )
 
 
 def total_time(plan) -> float:
-    try:
-        lines = plan.timelog_path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return 0.0
-    import json
-
-    total = 0.0
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if rec.get("kind") == "ticket":
-            total += float(rec.get("duration_s", 0))
-    return total
+    return sum(float(rec["duration_s"]) for rec in _closed_sessions(plan))
 
 
 def completed_today(plan) -> int:

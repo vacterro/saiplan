@@ -29,6 +29,15 @@ def test_backlinks_found(plan):
     assert "note-a" in bl[0].name
 
 
+def test_backlinks_require_exact_wikilink(plan):
+    notes.write_note(plan, "plain", "mentions S-007 without a link")
+    assert notes.backlinks(plan, "S-007") == []
+
+
+def test_reserved_note_name_is_safe(plan):
+    assert notes.write_note(plan, "CON", "x").name == "note-CON.md"
+
+
 def test_notes_unicode_names_preserved_and_atomic(plan):
     """Multilingual note names keep their Unicode (no collapse to 'note');
     writes are atomic (no temp litter)."""
@@ -83,6 +92,21 @@ def test_statistics_activity_from_log(plan):
     act = statistics.activity_counts(plan)
     assert act["TICKET_DONE"] == 2
     assert act["PLAN_REVIEWED"] == 1
+
+
+def test_statistics_rejects_corrupt_board_and_timelog(plan):
+    plan.board_path.write_text(
+        "## TODO\n## HUMAN\n## DOING\n## DONE\n## BLOCKED\n", encoding="utf-8"
+    )
+    assert statistics.status_totals(plan) == {}
+    plan.timelog_path.write_text(
+        '[]\n{"kind":"ticket","session_id":"a","ended_at":"x","duration_s":"banana"}\n'
+        '{"kind":"ticket","session_id":"b","ended_at":"x","duration_s":-2}\n'
+        '{"kind":"ticket","session_id":"c","ended_at":"x","duration_s":3}\n'
+        '{"kind":"ticket","session_id":"c","ended_at":"x","duration_s":3}\n',
+        encoding="utf-8",
+    )
+    assert statistics.total_time(plan) == 3.0
 
 
 def test_archive_move_and_restore(plan, tmp_path):

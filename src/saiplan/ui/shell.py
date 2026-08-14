@@ -7,11 +7,12 @@ silently — a failure never prevents the board from working (I1, I8).
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtCore import QSignalBlocker, Qt, QTimer, QUrl
 from PyQt6.QtGui import QAction, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QDockWidget,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -30,7 +31,14 @@ from ..core.config import Config
 from ..core.model import BLOCKED, DOING, DONE, TODO
 from ..core.persistence import BoardStore
 from ..core.plan import PlanStore
-from ..extras.sounds import SoundLibrary, SoundPlayer, SoundRegistry
+from ..extras.sounds import (
+    NullSoundLibrary,
+    NullSoundPlayer,
+    NullSoundRegistry,
+    SoundLibrary,
+    SoundPlayer,
+    SoundRegistry,
+)
 from ..extras.timers import TicketTimer
 from ..theme.loader import build_qss
 from ..theme.registry import ThemeRegistry
@@ -40,6 +48,7 @@ from .dialogs import (
     BreakDownDialog,
     ConflictDialog,
     PlanDialog,
+    RecoveryDialog,
     ReviewDialog,
     SettingsDialog,
     SoundDialog,
@@ -62,9 +71,19 @@ class App:
         # normalize to a real registry that falls back to the emergency theme
         self.theme_registry = theme_registry or ThemeRegistry(layout["themes"])
         self.plan_store = PlanStore(layout["plans"])
-        self.sound_library = SoundLibrary(layout["sounds"])
-        self.sound_registry = SoundRegistry(self.sound_library, config.get("sound_events") or {})
-        self.sound_player = SoundPlayer()
+        try:
+            self.sound_library = SoundLibrary(layout["sounds"])
+            self.sound_registry = SoundRegistry(
+                self.sound_library, config.get("sound_events") or {}
+            )
+            self.sound_player = SoundPlayer()
+        except Exception as error:  # noqa: BLE001 - optional sound cannot block Core
+            import logging
+
+            logging.getLogger("saiplan").error("sound subsystem disabled: %s", error)
+            self.sound_library = NullSoundLibrary()
+            self.sound_registry = NullSoundRegistry()
+            self.sound_player = NullSoundPlayer()
         self.timer_engine = timer_engine
         self.controller: BoardController | None = None
         self.ticket_timer: TicketTimer | None = None
@@ -110,6 +129,9 @@ class MainWindow(QMainWindow):
         create_btn = QPushButton("New Plan")
         create_btn.clicked.connect(self._new_plan)
         left_layout.addWidget(create_btn)
+        import_btn = QPushButton("Import Plan...")
+        import_btn.clicked.connect(self._import_plan)
+        left_layout.addWidget(import_btn)
         self.plan_list = QListWidget()
         self.plan_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.plan_list.customContextMenuRequested.connect(self._plan_menu)
@@ -150,6 +172,9 @@ class MainWindow(QMainWindow):
             on_notes=self._open_notes,
         )
         self.inspector.board_changed.connect(self._after_mutation)
+        self.inspector.save_failed.connect(
+            lambda message: self.status.showMessage(f"WARNING: {message}", 10000)
+        )
         self.inspector_dock = QDockWidget("Ticket", self)
         self.inspector_dock.setObjectName("inspectorDock")
         self.inspector_dock.setWidget(self.inspector)
@@ -168,6 +193,7 @@ class MainWindow(QMainWindow):
             ("Timers", self._open_timers),
             ("Sounds", self._open_sounds),
             ("Statistics", self._open_stats),
+            ("Recovery", self._open_recovery),
             ("Trash", self._open_trash),
             ("Settings", self._open_settings),
         ):
@@ -223,8 +249,19 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         plan = self._plans.get(item.data(Qt.ItemDataRole.UserRole))
-        if plan:
-            self._open_plan(plan)
+        if plan and not self._open_plan(plan):
+            self._select_active_plan()
+
+    def _select_active_plan(self) -> None:
+        controller = self.app.controller
+        if controller is None:
+            return
+        with QSignalBlocker(self.plan_list):
+            for row in range(self.plan_list.count()):
+                item = self.plan_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == controller.plan.plan_id:
+                    self.plan_list.setCurrentRow(row)
+                    break
 
     def _plan_menu(self, pos):
         item = self.plan_list.itemAt(pos)
@@ -239,6 +276,9 @@ class MainWindow(QMainWindow):
         rename = QAction("Rename...", self)
         rename.triggered.connect(lambda _=False: self._rename_plan(plan_id))
         menu.addAction(rename)
+        export = QAction("Export plan...", self)
+        export.triggered.connect(lambda _=False: self._export_plan(plan_id))
+        menu.addAction(export)
         archive = QAction("Archive", self)
         archive.triggered.connect(lambda _=False: self._archive_plan(plan_id))
         menu.addAction(archive)
@@ -263,6 +303,50 @@ class MainWindow(QMainWindow):
             # surgical update: keeps Objective/Constraints/DoD + unknown sections
             plan.update_plan_doc(name=name.strip())
             self._load_plans()
+
+    def _export_plan(self, plan_id: str):
+        from ..core.bundle import export_plan
+
+        plan = self._plans.get(plan_id)
+        if plan is None:
+            return
+        # flush any pending inspector draft so notes leave the window too
+        if self.app.controller is not None and plan_id == self.app.controller.plan.plan_id:
+            self.inspector.flush_pending()
+        default_name = f"{plan.name}.saiplan"
+        target, _filter = QFileDialog.getSaveFileName(
+            self, "Export plan", default_name, "SAIPLAN bundle (*.saiplan)"
+        )
+        if not target:
+            return
+        try:
+            export_plan(plan, target)
+        except OSError as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
+            return
+        self.status.showMessage(f"Plan '{plan.name}' exported", 6000)
+
+    def _import_plan(self):
+        from ..core.bundle import BundleError, import_plan
+
+        source, _filter = QFileDialog.getOpenFileName(
+            self, "Import plan", "", "SAIPLAN bundle (*.saiplan)"
+        )
+        if not source:
+            return
+        try:
+            plan = import_plan(self.app.layout["plans"], source)
+        except (BundleError, OSError) as exc:
+            QMessageBox.warning(self, "Import refused", str(exc))
+            return
+        recent = list(self.app.config.get("recent_plans") or [])
+        self.app.config.set(
+            "recent_plans", [plan.plan_id] + [p for p in recent if p != plan.plan_id]
+        )
+        self.app.config.save()
+        self._load_plans()
+        self._open_plan(plan)
+        self.status.showMessage(f"Plan '{plan.name}' imported", 6000)
 
     def _new_plan(self):
         dialog = PlanDialog(self)
@@ -292,8 +376,12 @@ class MainWindow(QMainWindow):
         # if the archived plan is the one the controller is using, detach it
         # cleanly first so a later mutation cannot recreate its old directory
         controller = self.app.controller
-        if controller is not None and controller.plan.plan_id == plan_id:
-            self._detach_active_plan()
+        if (
+            controller is not None
+            and controller.plan.plan_id == plan_id
+            and not self._detach_active_plan()
+        ):
+            return
         recent = list(self.app.config.get("recent_plans") or [])
         pinned = list(self.app.config.get("pinned_plans") or [])
         for lst in (recent, pinned):
@@ -309,9 +397,14 @@ class MainWindow(QMainWindow):
     def _detach_active_plan(self):
         """Stop ticket timers and drop the controller before archiving the
         active plan."""
+        if not self.inspector.flush_pending():
+            return False
         if self.app.ticket_timer is not None:
-            for tid in self.app.ticket_timer.running():
-                self.app.ticket_timer.stop_ticket(tid)
+            try:
+                self.app.ticket_timer.stop_all()
+            except OSError as error:
+                self.status.showMessage(f"WARNING: could not close ticket timers: {error}")
+                return False
         self.app.controller = None
         self.app.ticket_timer = None
         self.board_view.controller = None
@@ -320,6 +413,7 @@ class MainWindow(QMainWindow):
         self.conflict_banner.hide()
         self.setWindowTitle("SAIPLAN")
         self.status.showMessage("Plan archived")
+        return True
 
     def _open_initial(self):
         plans = self.app.plan_store.list_plans()
@@ -339,6 +433,9 @@ class MainWindow(QMainWindow):
 
     # -- controller ----------------------------------------------------
     def _open_plan(self, plan):
+        if self.app.controller is not None and not self.inspector.flush_pending():
+            self.status.showMessage("WARNING: plan switch blocked by unsaved ticket changes")
+            return False
         mirror_dir = self.app.config.get("mirror_dir") or None
         store = BoardStore(
             plan.board_path,
@@ -349,11 +446,31 @@ class MainWindow(QMainWindow):
         )
         controller = BoardController(plan, store, self.app.config)
         controller.load()
+        same_plan = (
+            self.app.controller is not None
+            and self.app.controller.plan.plan_id == plan.plan_id
+            and self.app.ticket_timer is not None
+        )
+        if same_plan:
+            ticket_timer = self.app.ticket_timer
+        else:
+            try:
+                ticket_timer = TicketTimer(plan.timelog_path)
+            except OSError as error:
+                self.status.showMessage(f"WARNING: ticket timers disabled for this plan: {error}")
+                ticket_timer = None
+        if self.app.ticket_timer is not None and not same_plan:
+            try:
+                self.app.ticket_timer.stop_all()
+            except OSError as error:
+                self.status.showMessage(f"WARNING: plan switch blocked by ticket timer: {error}")
+                return False
         self.app.controller = controller
-        self.app.ticket_timer = TicketTimer(plan.timelog_path)
-        self.app.timer_engine.ticket_timer = self.app.ticket_timer
+        self.app.ticket_timer = ticket_timer
+        self.app.timer_engine.ticket_timer = ticket_timer
         self.inspector.controller = controller
-        self.inspector.ticket_timer = self.app.ticket_timer
+        self.inspector.clear_preserved_conflict_draft()
+        self.inspector.ticket_timer = ticket_timer
         self.board_view.controller = controller
         self._conflict_shown = False
         self.conflict_banner.hide()
@@ -365,6 +482,7 @@ class MainWindow(QMainWindow):
         ]
         self.app.config.set("recent_plans", recent[:10])
         self.app.config.save()
+        return True
 
     def _refresh(self):
         controller = self.app.controller
@@ -406,6 +524,8 @@ class MainWindow(QMainWindow):
         controller = self.app.controller
         if controller is None:
             return
+        if self.inspector.ticket_id == ticket_id and not self.inspector.flush_pending():
+            return
         ticket = controller.board.get(ticket_id)
         if ticket is None or ticket.status == target:
             return
@@ -440,7 +560,7 @@ class MainWindow(QMainWindow):
             self._play("ticket_done")
         elif event == "TICKET_BLOCKED":
             self._play("blocked_warning")
-        if event and self._plan_just_completed(controller):
+        if event == "TICKET_DONE" and self._plan_just_completed(controller):
             self._play("plan_completed")
         controller.last_event = None
 
@@ -466,6 +586,8 @@ class MainWindow(QMainWindow):
             self, "SAIPLAN", f"Move {len(ids)} ticket(s) to Trash? They can be restored later."
         )
         if resp != QMessageBox.StandardButton.Yes:
+            return
+        if self.inspector.ticket_id in ids and not self.inspector.flush_pending():
             return
         for tid in ids:
             try:
@@ -530,12 +652,13 @@ class MainWindow(QMainWindow):
         plan = self.app.controller.plan if self.app.controller else None
         if plan is None:
             return
-        plan.ensure_dirs()
-        path = plan.notes_dir / f"{ticket_id}.md"
+        from ..extras.notes import note_path, write_note
+
+        path = note_path(plan, ticket_id)
         if not path.exists():
             ticket = self.app.controller.board.get(ticket_id)
             title = ticket.title if ticket else ticket_id
-            path.write_text(f"# {ticket_id} — {title}\n\n", encoding="utf-8")
+            path = write_note(plan, ticket_id, f"# {ticket_id} - {title}\n\n")
         QDesktop.open(path)
 
     # -- dialogs -------------------------------------------------------
@@ -602,7 +725,10 @@ class MainWindow(QMainWindow):
             return
         self._after_mutation()
         ids = ", ".join(t.ticket_id for t in created)
-        self.status.showMessage(f"Broken down into {len(created)} ticket(s): {ids}")
+        message = f"Broken down into {len(created)} ticket(s): {ids}"
+        if controller.last_result.warnings:
+            message += f"; WARNING: {controller.last_result.warnings[-1]}"
+        self.status.showMessage(message)
 
     def _plan_review(self):
         if self.app.controller is None:
@@ -628,6 +754,12 @@ class MainWindow(QMainWindow):
             return
         StatsDialog(self.app.controller, self).exec()
 
+    def _open_recovery(self):
+        if self.app.controller is None:
+            return
+        RecoveryDialog(self.app.controller, self).exec()
+        self._refresh()
+
     def _open_trash(self):
         TrashDialog(self.app.controller, self).exec()
         self._refresh()
@@ -652,12 +784,12 @@ class MainWindow(QMainWindow):
 
     # -- theme ---------------------------------------------------------
     def _apply_theme(self):
-        slug = self.app.config.get("theme") or "goldenvintage"
-        theme = self.app.theme_registry.get(slug)
+        requested = self.app.config.get("theme") or "goldenvintage"
+        theme = self.app.theme_registry.get(requested)
         qss = build_qss(theme.tokens, float(self.app.config.get("scale", 1.0)))
         QApplication.instance().setStyleSheet(qss)
         self.app.config.set("theme", theme.slug)
-        if self.app.config.get("theme") != theme.slug:
+        if requested != theme.slug:
             self.app.config.save()
 
     # -- sounds --------------------------------------------------------
@@ -668,7 +800,7 @@ class MainWindow(QMainWindow):
         if path is None:
             return
         volume = int(self.app.config.get("sound_volume", 5)) / 10.0
-        self.app.sound_player.play_file(path, volume)
+        self.app.sound_player.play_file(path, volume * self.app.sound_registry.volume_for(event))
 
     # -- external edits -------------------------------------------------
     def _poll_external(self):
@@ -692,22 +824,28 @@ class MainWindow(QMainWindow):
         dialog = ConflictDialog(self)
         choice = dialog.exec()
         if choice == 1:  # reload external (local preserved in a conflict copy)
+            if not self.inspector.preserve_pending_for_conflict():
+                return
             try:
                 path = controller.resolve_reload_external()
             except ControllerError as e:
                 QMessageBox.warning(self, "SAIPLAN", str(e))
                 self._conflict_shown = False
                 return
+            self.inspector.reconcile_after_conflict()
             self._refresh()
             if path:
                 self.status.showMessage(f"Reloaded external; local preserved in {path}")
         elif choice == 2:  # keep mine (external preserved in a conflict copy)
+            if not self.inspector.preserve_pending_for_conflict():
+                return
             try:
                 path = controller.resolve_keep_mine()
             except ControllerError as e:
                 QMessageBox.warning(self, "SAIPLAN", str(e))
                 self._conflict_shown = False
                 return
+            self.inspector.reconcile_after_conflict()
             self._refresh()
             if path:
                 self.status.showMessage(f"Kept local; external preserved in {path}")
@@ -721,13 +859,14 @@ class MainWindow(QMainWindow):
         for timer in fired:
             self._play("timer_finished")
             self.status.showMessage(f"Timer finished: {timer.label}", 8000)
-        if engine.tick_pomodoro():
-            if engine.pomodoro.phase in ("short_break", "long_break"):
+        event = engine.tick_pomodoro()
+        if event:
+            if event.completed_phase == "work":
                 self._play("pomodoro_work_done")
-                self.status.showMessage("Pomodoro work session done — take a break", 8000)
+                self.status.showMessage("Pomodoro work session done - take a break", 8000)
             else:
                 self._play("break_finished")
-                self.status.showMessage("Break over — back to work", 8000)
+                self.status.showMessage("Break over - back to work", 8000)
 
     # -- persistence of window state ------------------------------------
     def _restore_geometry(self):
@@ -741,6 +880,17 @@ class MainWindow(QMainWindow):
             self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
 
     def closeEvent(self, event):
+        if not self.inspector.flush_pending():
+            self.status.showMessage("WARNING: close blocked by unsaved ticket changes")
+            event.ignore()
+            return
+        if self.app.ticket_timer is not None:
+            try:
+                self.app.ticket_timer.stop_all()
+            except OSError as error:
+                self.status.showMessage(f"WARNING: close blocked by ticket timer: {error}")
+                event.ignore()
+                return
         geom = bytes(self.saveGeometry()).hex()
         self.app.config.set("window_geometry", geom)
         self.app.config.save()

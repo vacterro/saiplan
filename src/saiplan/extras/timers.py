@@ -22,9 +22,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -94,6 +95,8 @@ class DeadlineTimer:
 
     @staticmethod
     def from_record(rec: dict) -> DeadlineTimer | None:
+        if not isinstance(rec, dict):
+            return None
         if rec.get("kind") != "deadline" or not rec.get("target_at"):
             return None
         if parse_iso(rec["target_at"]) is None:
@@ -103,12 +106,21 @@ class DeadlineTimer:
             # a malformed persisted repeat is skipped safely (never a hang,
             # never a silently wrong interval)
             return None
+        tid = rec.get("tid")
+        label = rec.get("label", "timer")
+        snoozed = rec.get("snoozed_until")
+        if tid is not None and (not isinstance(tid, str) or not tid):
+            return None
+        if not isinstance(label, str):
+            return None
+        if snoozed is not None and parse_iso(snoozed) is None:
+            return None
         return DeadlineTimer(
-            tid=rec.get("tid") or uuid.uuid4().hex[:12],
-            label=rec.get("label", "timer"),
+            tid=tid or uuid.uuid4().hex[:12],
+            label=label,
             target_at=rec["target_at"],
             repeat_every_s=repeat,
-            snoozed_until=rec.get("snoozed_until"),
+            snoozed_until=snoozed,
         )
 
 
@@ -155,6 +167,13 @@ class Stopwatch:
 POMODORO_PHASES = ("work", "short_break", "long_break")
 
 
+@dataclass(frozen=True)
+class PomodoroEvent:
+    completed_phase: str
+    next_phase: str
+    cycle: int
+
+
 class Pomodoro:
     """work -> short_break -> work -> ... ; every 4th break is long.
     Elapsed-driven; run state does not survive restart (idle)."""
@@ -172,7 +191,6 @@ class Pomodoro:
         self.completed_work = 0
         self._started_mono: float | None = None
         self._paused_at: float | None = None
-        self.alarm_pending = False
         self._phase_duration = self.work_s
 
     @property
@@ -183,7 +201,7 @@ class Pomodoro:
         self.phase = "work"
         self._phase_duration = self.work_s
         self._started_mono = _monotonic()
-        self.alarm_pending = False
+        self._paused_at = None
 
     def pause(self) -> None:
         if self.running and self._paused_at is None:
@@ -205,20 +223,18 @@ class Pomodoro:
             elapsed -= _monotonic() - self._paused_at
         return max(0.0, self._phase_duration - elapsed)
 
-    def tick(self) -> bool:
-        """Returns True when the current phase finished (once per finish)."""
+    def tick(self) -> PomodoroEvent | None:
+        """Auto-advance one due phase and return old/new semantic state."""
         if self.phase == "idle" or self._started_mono is None:
-            return False
+            return None
         if self.phase_remaining() > 0:
-            return False
-        if self.alarm_pending:
-            return False
-        self.alarm_pending = True
-        return True
+            return None
+        completed = self.phase
+        self._advance_phase()
+        return PomodoroEvent(completed, self.phase, self.completed_work)
 
     def ack_alarm(self) -> None:
-        """User acknowledged the phase-end -> advance to the next phase."""
-        self._advance_phase()
+        """Compatibility no-op: v1 Pomodoro auto-advances on tick."""
 
     def _advance_phase(self) -> None:
         if self.phase == "work":
@@ -233,7 +249,7 @@ class Pomodoro:
             self.phase = "work"
             self._phase_duration = self.work_s
         self._started_mono = _monotonic()
-        self.alarm_pending = False
+        self._paused_at = None
 
 
 class TicketTimer:
@@ -253,20 +269,22 @@ class TicketTimer:
         self.path = Path(timelog_path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._open: dict[str, dict] = {}
+        self.load()
 
     def start(self, ticket_id: str) -> str:
+        started_mono = _monotonic()
         rec = {
             "kind": "ticket",
             "session_id": uuid.uuid4().hex[:12],
             "ticket_id": ticket_id,
             "started_at": _now_iso(),
         }
-        self._open[rec["session_id"]] = {**rec, "started_mono": _monotonic()}
         self._append(rec)
+        self._open[rec["session_id"]] = {**rec, "started_mono": started_mono}
         return rec["session_id"]
 
     def stop(self, session_id: str) -> dict | None:
-        live = self._open.pop(session_id, None)
+        live = self._open.get(session_id)
         if live is None:
             return None
         rec = {
@@ -278,6 +296,7 @@ class TicketTimer:
             "kind": "ticket",
         }
         self._append(rec)
+        self._open.pop(session_id, None)
         return rec
 
     def stop_ticket(self, ticket_id: str) -> dict | None:
@@ -298,6 +317,14 @@ class TicketTimer:
     def running(self) -> list[str]:
         return [live["ticket_id"] for live in self._open.values()]
 
+    def stop_all(self) -> list[dict]:
+        closed = []
+        for session_id in list(self._open):
+            rec = self.stop(session_id)
+            if rec is not None:
+                closed.append(rec)
+        return closed
+
     def is_running(self, ticket_id: str) -> bool:
         return any(live["ticket_id"] == ticket_id for live in self._open.values())
 
@@ -310,30 +337,52 @@ class TicketTimer:
     def load(self) -> list[dict]:
         """Read TIMELOG.jsonl, collapsing open/closed pairs into sessions and
         recovering sessions left open by a crash."""
-        sessions: list[dict] = []
-        closed_ids: set[str] = set()
+        closed: dict[str, dict] = {}
         opens: dict[str, dict] = {}
         try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            lines = []
-        for line in lines:
-            if not line.strip():
+            raw_lines = self.path.read_bytes().splitlines()
+        except FileNotFoundError:
+            raw_lines = []
+        for raw_line in raw_lines:
+            if not raw_line.strip():
                 continue
             try:
+                line = raw_line.decode("utf-8")
                 rec = json.loads(line)
-            except json.JSONDecodeError:
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict):
                 continue
             sid = rec.get("session_id")
-            if not sid or rec.get("kind") != "ticket":
+            ticket_id = rec.get("ticket_id")
+            started_at = rec.get("started_at")
+            if (
+                not isinstance(sid, str)
+                or not sid
+                or rec.get("kind") != "ticket"
+                or not isinstance(ticket_id, str)
+                or not isinstance(started_at, str)
+                or parse_iso(started_at) is None
+            ):
                 continue
             if rec.get("ended_at"):
-                sessions.append(rec)
-                closed_ids.add(sid)
+                duration = rec.get("duration_s")
+                try:
+                    duration_value = float(duration)
+                except (OverflowError, TypeError, ValueError):
+                    continue
+                if (
+                    isinstance(duration, bool)
+                    or not isinstance(duration, (int, float))
+                    or not math.isfinite(duration_value)
+                    or duration_value < 0
+                ):
+                    continue
+                closed.setdefault(sid, rec)
             else:
                 opens[sid] = rec
         for sid, rec in opens.items():
-            if sid in closed_ids:
+            if sid in closed or sid in self._open:
                 continue  # already closed; the open marker is just history
             rec = dict(rec)
             ended = parse_iso(_now_iso())
@@ -350,7 +399,8 @@ class TicketTimer:
                 rec["duration_source"] = "unknown"
             rec["recovered"] = True
             self._append(rec)
-            sessions.append(rec)
+            closed[sid] = rec
+        sessions = list(closed.values())
         sessions.sort(key=lambda r: r.get("started_at", ""))
         return sessions
 
@@ -363,6 +413,8 @@ class TicketTimer:
     def _append(self, rec: dict) -> None:
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
 
 class TimerEngine:
@@ -388,24 +440,31 @@ class TimerEngine:
         if self.path is None or not self.path.exists():
             return
         try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
+            lines = self.path.read_bytes().splitlines()
         except OSError:
             return
-        for line in lines:
+        for raw in lines:
             try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
+                rec = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                continue
+            if not isinstance(rec, dict):
                 continue
             timer = DeadlineTimer.from_record(rec)
             if timer is not None:
                 self.deadline[timer.tid] = timer
 
-    def save(self) -> None:
+    def save(self, deadline: dict[str, DeadlineTimer] | None = None) -> None:
         if self.path is None:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        body = "".join(json.dumps(t.to_record()) + "\n" for t in self.deadline.values())
+        state = self.deadline if deadline is None else deadline
+        body = "".join(json.dumps(t.to_record()) + "\n" for t in state.values())
         atomic_write(self.path, body)
+
+    def _commit_deadline(self, candidate: dict[str, DeadlineTimer]) -> None:
+        self.save(candidate)
+        self.deadline = candidate
 
     def add_deadline(
         self, target_iso: str, label: str = "timer", repeat_every_s: float | None = None
@@ -418,36 +477,48 @@ class TimerEngine:
                 "must be a finite positive number or None"
             )
         timer = DeadlineTimer(target_at=target_iso, label=label, repeat_every_s=repeat_every_s)
-        self.deadline[timer.tid] = timer
-        self.save()
+        candidate = dict(self.deadline)
+        candidate[timer.tid] = timer
+        self._commit_deadline(candidate)
         return timer
 
     def snooze(self, tid: str, seconds: float) -> None:
-        timer = self.deadline.get(tid)
-        if timer is None:
+        current = self.deadline.get(tid)
+        if current is None:
             return
+        timer = replace(current)
         base = parse_iso(timer.target_at) or time.time()
         target = max(time.time(), base) + max(1.0, seconds)
         timer.snoozed_until = datetime.fromtimestamp(target, tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         timer.target_at = timer.snoozed_until
+        candidate = dict(self.deadline)
+        candidate[tid] = timer
+        self._commit_deadline(candidate)
         self._fired.discard(tid)
-        self.save()
 
     def cancel(self, tid: str) -> None:
-        self.deadline.pop(tid, None)
-        self.save()
+        if tid not in self.deadline:
+            return
+        candidate = dict(self.deadline)
+        candidate.pop(tid)
+        self._commit_deadline(candidate)
+        self._fired.discard(tid)
 
     def tick(self, now: float | None = None) -> list[DeadlineTimer]:
         """Advance all timers. Returns timers that finished NOW (once each)."""
         now = now if now is not None else time.time()
         fired: list[DeadlineTimer] = []
-        for tid, timer in list(self.deadline.items()):
+        candidate = {tid: replace(timer) for tid, timer in self.deadline.items()}
+        fired_ids = set(self._fired)
+        changed = False
+        for tid, timer in list(candidate.items()):
             target = parse_iso(timer.target_at)
             if target is None:
                 continue
-            if now >= target and tid not in self._fired:
-                self._fired.add(tid)
+            if now >= target and tid not in fired_ids:
+                fired_ids.add(tid)
                 fired.append(timer)
+                changed = True
                 if timer.repeat_every_s and _valid_repeat(timer.repeat_every_s):
                     interval = float(timer.repeat_every_s)
                     next_target = target + interval
@@ -457,9 +528,12 @@ class TimerEngine:
                         "%Y-%m-%dT%H:%M:%SZ"
                     )
                     timer.snoozed_until = None
+                    fired_ids.discard(tid)
                 else:
-                    self.deadline.pop(tid)
-                self.save()
+                    candidate.pop(tid)
+        if changed:
+            self._commit_deadline(candidate)
+            self._fired = fired_ids
         for timer in fired:
             if self.on_fire is not None:
                 try:
@@ -468,12 +542,39 @@ class TimerEngine:
                     _logger.warning("on_fire callback failed: %s", e)
         return fired
 
-    def tick_pomodoro(self) -> bool:
-        """Advance the pomodoro; returns True when a phase just finished."""
-        finished = self.pomodoro.tick()
-        if finished and self.on_pomodoro_phase is not None:
+    def tick_pomodoro(self) -> PomodoroEvent | None:
+        event = self.pomodoro.tick()
+        if event and self.on_pomodoro_phase is not None:
             try:
-                self.on_pomodoro_phase(self.pomodoro.phase)
+                self.on_pomodoro_phase(event)
             except Exception as e:  # noqa: BLE001
                 _logger.warning("on_pomodoro_phase callback failed: %s", e)
-        return finished
+        return event
+
+
+class NullTimerEngine:
+    """Disabled extra used when timer construction fails; Core stays alive."""
+
+    def __init__(self):
+        self.deadline = {}
+        self.stopwatch = Stopwatch()
+        self.pomodoro = Pomodoro()
+        self.ticket_timer = None
+
+    def tick(self, now=None):
+        return []
+
+    def tick_pomodoro(self):
+        return None
+
+    def save(self):
+        return None
+
+    def add_deadline(self, *args, **kwargs):
+        return None
+
+    def snooze(self, *args, **kwargs):
+        return None
+
+    def cancel(self, *args, **kwargs):
+        return None

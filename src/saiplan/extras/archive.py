@@ -15,7 +15,9 @@ import shutil
 from datetime import UTC
 from pathlib import Path
 
+from ..core.board import parse_board_detailed, validate_board_semantics
 from ..core.persistence import atomic_write
+from ..core.plan import read_plan_md
 
 ARCHIVE_META = "archive.json"
 _DATE_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}(?:-\d+)?$")
@@ -38,26 +40,29 @@ def archive_plan(plans_dir: Path, plan_id: str) -> Path | None:
     while dst.exists():
         n += 1
         dst = root / f"{plan_id}-{stamp}-{n}"
+    atomic_write(
+        src / ARCHIVE_META,
+        json.dumps({"original_plan_id": plan_id, "archived_at": stamp}, indent=2),
+    )
     shutil.move(str(src), str(dst))
-    try:
-        atomic_write(
-            dst / ARCHIVE_META,
-            json.dumps({"original_plan_id": plan_id, "archived_at": stamp}, indent=2),
-        )
-    except OSError:
-        pass  # missing metadata degrades to the filename heuristic on restore
     return dst
 
 
-def _original_plan_id(archived: Path) -> str:
+def _original_plan_id(archived: Path) -> str | None:
     meta = archived / ARCHIVE_META
     if meta.exists():
         try:
             data = json.loads(meta.read_text(encoding="utf-8"))
-            if isinstance(data.get("original_plan_id"), str) and data["original_plan_id"]:
-                return data["original_plan_id"]
-        except (json.JSONDecodeError, OSError):
-            pass
+            original = data.get("original_plan_id") if isinstance(data, dict) else None
+            if (
+                isinstance(original, str)
+                and original not in ("", ".", "..")
+                and Path(original).name == original
+            ):
+                return original
+        except (json.JSONDecodeError, OSError, TypeError, UnicodeError):
+            return None
+        return None
     # legacy archive (pre-metadata): strip a trailing `-YYYY-MM-DD[-N]`
     return _DATE_SUFFIX.sub("", archived.name) or archived.name
 
@@ -74,9 +79,26 @@ def restore_plan(plans_dir: Path, archived: Path) -> Path | None:
     plan_id. A collision gets a deterministic `-restored` suffix."""
     if not archived.is_dir():
         return None
+    try:
+        info = read_plan_md(archived / "PLAN.md")
+        board_text = (archived / "BOARD.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    board, errors, _warnings = parse_board_detailed(board_text)
+    if not info["name"] or errors or validate_board_semantics(board):
+        return None
     original = _original_plan_id(archived)
+    if not original:
+        return None
     dst = plans_dir / original
-    if dst.exists():
-        dst = plans_dir / f"{original}-restored"
+    suffix = 0
+    while dst.exists():
+        suffix += 1
+        ending = "-restored" if suffix == 1 else f"-restored-{suffix}"
+        dst = plans_dir / f"{original}{ending}"
     shutil.move(str(archived), str(dst))
+    try:
+        (dst / ARCHIVE_META).unlink()
+    except OSError:
+        pass
     return dst

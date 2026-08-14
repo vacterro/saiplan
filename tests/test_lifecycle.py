@@ -77,6 +77,27 @@ def test_start_allowed_after_dependency_done():
     transition(board, t.ticket_id, DOING)  # must not raise
 
 
+def test_done_rechecks_dependencies():
+    board = Board()
+    dep = create_ticket(board, "Dependency")
+    ticket = create_ticket(board, "Work")
+    transition(board, ticket.ticket_id, DOING)
+    ticket.set_field("needs", dep.ticket_id)
+    with pytest.raises(TransitionRefused, match="unmet needs"):
+        transition(board, ticket.ticket_id, DONE)
+
+
+def test_single_focus_refuses_second_start_but_can_be_disabled():
+    board = Board()
+    first = create_ticket(board, "First")
+    second = create_ticket(board, "Second")
+    transition(board, first.ticket_id, DOING, single_focus=True)
+    transition(board, first.ticket_id, DOING, single_focus=True)
+    with pytest.raises(TransitionRefused, match="single focus"):
+        transition(board, second.ticket_id, DOING, single_focus=True)
+    transition(board, second.ticket_id, DOING, single_focus=False)
+
+
 def test_block_requires_reason():
     board = Board()
     t = create_ticket(board, "Task")

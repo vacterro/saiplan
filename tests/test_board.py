@@ -2,7 +2,13 @@
 
 from conftest import build_board
 
-from saiplan.core.board import escape_value, parse_board, render_board, render_ticket
+from saiplan.core.board import (
+    escape_value,
+    parse_board,
+    render_board,
+    render_ticket,
+    validate_board_semantics,
+)
 from saiplan.core.lifecycle import create_ticket
 from saiplan.core.model import BLOCKED, DOING, DONE, TODO, Board, Ticket
 
@@ -104,6 +110,31 @@ def test_ticket_under_unknown_heading_is_error():
     text = "## WIP\n- [ ] S-001 A\n## TODO\n## DOING\n## DONE\n## BLOCKED\n"
     _board, errors = parse_board(text)
     assert any("unknown heading" in e for e in errors)
+
+
+def test_empty_unknown_heading_is_error():
+    text = "## DOING\n## TODO\n## HUMAN SECTION\n## DONE\n## BLOCKED\n"
+    _board, errors = parse_board(text)
+    assert any("unknown level-2 heading" in error for error in errors)
+
+
+def test_malformed_needs_never_invents_ids():
+    board = build_board("TODO S-001 A", "TODO S-002 B")
+    board.get("S-001").set_field("needs", "BROKEN,S-999x,S-2")
+    assert board.get("S-001").needs == []
+    errors = validate_board_semantics(board)
+    assert any("malformed needs" in error for error in errors)
+
+
+def test_semantics_reject_self_duplicate_dangling_and_cycle():
+    board = build_board("TODO S-001 A", "TODO S-002 B")
+    board.get("S-001").set_field("needs", "S-001,S-999")
+    assert any("self-dependency" in error for error in validate_board_semantics(board))
+    board.get("S-001").set_field("needs", "S-002,S-002")
+    assert any("duplicate dependency" in error for error in validate_board_semantics(board))
+    board.get("S-001").set_field("needs", "S-002")
+    board.get("S-002").set_field("needs", "S-001")
+    assert any("cycle" in error for error in validate_board_semantics(board))
 
 
 def test_blocked_by_field_preserved():

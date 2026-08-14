@@ -2,6 +2,7 @@
 
 import pytest
 
+from saiplan.core.persistence import validate_snapshot
 from saiplan.core.plan import PlanStore, slugify
 
 
@@ -17,6 +18,9 @@ def test_create_plan_writes_plan_and_board(store, tmp_path):
     assert plan.board_path.read_text(encoding="utf-8").startswith("## DOING")
     assert plan.name == "My Great Plan"
     assert plan.objective == "Ship it"
+    snapshots = list(plan.history_dir.glob("snapshot-*.board.md"))
+    assert len(snapshots) == 1
+    assert validate_snapshot(snapshots[0])
 
 
 def test_list_and_get_plans(store):

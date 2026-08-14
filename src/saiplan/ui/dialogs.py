@@ -6,8 +6,10 @@ board by itself — one writer (controller) keeps conflicts impossible.
 
 from __future__ import annotations
 
+import datetime
 import time
 from datetime import UTC
+from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -600,3 +602,120 @@ class ConflictDialog(QDialog):
         keep_btn.clicked.connect(lambda: self.done(2))
         cancel_btn.clicked.connect(self.reject)
         layout.addWidget(buttons)
+
+
+class RecoveryDialog(QDialog):
+    """Browse .history recovery artifacts and restore a validated snapshot.
+
+    Restore is transactional on the controller side: the current primary is
+    backed up byte-exact first (restore-before copy), an undo entry is
+    recorded, `SNAPSHOT_RESTORED` is appended to the semantic LOG, and the
+    snapshot is adopted only after the save lands. The dialog itself never
+    mutates the board — it asks the controller, one writer (spec 2).
+    """
+
+    def __init__(self, controller, parent=None):
+        super().__init__(parent)
+        self.controller = controller
+        self.artifacts = controller.recovery_artifacts()
+        self._items: list[dict] = []
+        self.setWindowTitle("Recovery")
+        self.setMinimumSize(680, 460)
+        layout = QVBoxLayout(self)
+        hint = QLabel(
+            "Snapshots are automatic backups of BOARD.md, created on every save. "
+            "Restore puts a validated snapshot back in place — your current board "
+            "is backed up first, and undo still works. Forensic corrupt and "
+            "pre-restore copies are kept byte-exact for inspection."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        split = QHBoxLayout()
+        self.list_widget = QListWidget()
+        self.list_widget.currentRowChanged.connect(self._on_select)
+        split.addWidget(self.list_widget, 1)
+        self.preview = QPlainTextEdit()
+        self.preview.setReadOnly(True)
+        self.preview.setPlaceholderText("Select an artifact to preview its contents.")
+        split.addWidget(self.preview, 2)
+        layout.addLayout(split, 1)
+
+        buttons = QDialogButtonBox()
+        self.restore_btn = buttons.addButton(
+            "Restore selected snapshot", QDialogButtonBox.ButtonRole.AcceptRole
+        )
+        close_btn = buttons.addButton("Close", QDialogButtonBox.ButtonRole.RejectRole)
+        self.restore_btn.clicked.connect(self._restore)
+        close_btn.clicked.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._populate()
+
+    # -- listing ------------------------------------------------------
+    def _populate(self) -> None:
+        self.list_widget.clear()
+        self._items = list(self.artifacts)
+        for artifact in self._items:
+            item = QListWidgetItem(self._label(artifact))
+            item.setData(Qt.ItemDataRole.UserRole, artifact["path"])
+            if artifact["kind"] != "snapshot" or not artifact["valid"]:
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
+            self.list_widget.addItem(item)
+        if not self._items:
+            self.list_widget.addItem("No recovery artifacts yet. Snapshots appear on every save.")
+        self.list_widget.setCurrentRow(0)
+
+    @staticmethod
+    def _label(artifact: dict) -> str:
+        ts = datetime.datetime.fromtimestamp(artifact["mtime_ns"] / 1e9, tz=UTC).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+        kind = artifact["kind"]
+        tag = {
+            "snapshot": "snapshot",
+            "corrupt": "corrupt primary copy",
+            "restore-before": "pre-restore backup",
+        }[kind]
+        suffix = "" if (kind == "snapshot" and artifact["valid"]) else " (view only)"
+        return f"{ts}  [{tag}]{suffix}  {artifact['summary']}"
+
+    def _on_select(self, row: int) -> None:
+        if row < 0 or row >= len(self._items):
+            self.preview.setPlainText("")
+            self.restore_btn.setEnabled(False)
+            return
+        artifact = self._items[row]
+        try:
+            text = Path(artifact["path"]).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        self.preview.setPlainText(text)
+        self.restore_btn.setEnabled(artifact["kind"] == "snapshot" and artifact["valid"])
+
+    def _restore(self) -> None:
+        row = self.list_widget.currentRow()
+        if row < 0 or row >= len(self._items):
+            return
+        artifact = self._items[row]
+        answer = QMessageBox.question(
+            self,
+            "Restore snapshot?",
+            "This replaces the current BOARD.md with the selected snapshot.\n"
+            "The current board is backed up first and undo stays available.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.controller.restore_snapshot(artifact["path"])
+        except Exception as exc:  # noqa: BLE001 - surface any refusal to the human
+            QMessageBox.warning(self, "Restore refused", str(exc))
+            return
+        self.artifacts = self.controller.recovery_artifacts()
+        self._populate()
+        QMessageBox.information(
+            self,
+            "Snapshot restored",
+            "The snapshot is now BOARD.md. A backup of the previous board and "
+            "an undo entry were kept.",
+        )

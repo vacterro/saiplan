@@ -112,14 +112,15 @@ def notify_existing_instance(server_name: str, layout: dict, timeout_ms: int = 6
     socket = QLocalSocket()
     loop = QEventLoop()
     acked = [False]
+    response = bytearray()
 
     def _connected():
         socket.write(nonce.encode("utf-8"))
         socket.flush()
 
     def _ready_read():
-        data = bytes(socket.readAll())
-        if _ACK in data:
+        response.extend(bytes(socket.readAll()))
+        if _ACK in response:
             acked[0] = True
             loop.quit()
 

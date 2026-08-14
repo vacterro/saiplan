@@ -13,11 +13,19 @@ from pathlib import Path
 import pytest
 
 IS_WIN32 = sys.platform == "win32"
-pytestmark = pytest.mark.skipif(not IS_WIN32, reason="single-instance is Win32 behaviour")
+pytestmark = [
+    pytest.mark.windows,
+    pytest.mark.subprocess,
+    pytest.mark.integration,
+    pytest.mark.slow,
+    pytest.mark.qt,
+    pytest.mark.skipif(not IS_WIN32, reason="single-instance is Win32 behaviour"),
+]
 
 _ENV_BASE = {
     "QT_QPA_PLATFORM": "offscreen",
     "PYTHONIOENCODING": "utf-8",
+    "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
 }
 
 
