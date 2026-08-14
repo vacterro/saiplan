@@ -100,3 +100,30 @@ def test_save_keeps_only_known_keys(tmp_path):
     loaded = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert "bogus_key" not in loaded
     assert loaded["theme"] == "oled"
+
+
+def test_wip_limits_invalid_values_dropped(tmp_path):
+    c = Config(
+        _write(
+            tmp_path,
+            {"wip_limits": {"DOING": "lots", "TODO": 0, "DONE": -3, "BLOCKED": 2, 7: 4}},
+        )
+    )
+    c.load()
+    assert c.get("wip_limits") == {"BLOCKED": 2}  # only valid positive ints kept
+
+
+def test_wip_limits_non_dict_falls_back(tmp_path):
+    c = Config(_write(tmp_path, {"wip_limits": [1, 2, 3]}))
+    c.load()
+    assert c.get("wip_limits") == {}
+
+
+def test_wip_limits_survive_restart(tmp_path):
+    path = tmp_path / "config.json"
+    c = Config(path)
+    c.set("wip_limits", {"DOING": 2, "TODO": 5})
+    c.save()
+    c2 = Config(path)
+    c2.load()
+    assert c2.get("wip_limits") == {"DOING": 2, "TODO": 5}

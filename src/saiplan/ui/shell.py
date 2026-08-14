@@ -779,6 +779,7 @@ class MainWindow(QMainWindow):
             Qt.WindowType.WindowStaysOnTopHint, bool(self.app.config.get("always_on_top", False))
         )
         self.show()
+        self._refresh()  # re-render column headers so WIP badges update now
         # mirror setting takes effect on next plan open
         self.status.showMessage("Settings saved (mirror applies on next plan open)")
 

@@ -1,8 +1,8 @@
 ---
 phase: BUILD
-task: T-031
-next_action: "PHASE BUILD T-031 (after T-011 human walk clears the release)"
-blocker: none (T-011 human pass runs in parallel; does not block agent work)
+task: T-011 (manual)
+next_action: "human: docs/RELEASE_WALK.md (10-minute pass) then tag v0.1.1"
+blocker: T-011 manual on-screen human pass
 agent: opencode
 saipen_version: 7
 schema_version: 3

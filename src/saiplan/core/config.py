@@ -58,6 +58,28 @@ def _as_str_dict(value, default):
     return default
 
 
+_WIP_COLUMNS = ("DOING", "TODO", "DONE", "BLOCKED")
+
+
+def _as_wip_limits(value, default):
+    """Per-column WIP caps: {column: int>=1} for the four board columns.
+    Absent/zero means no limit; anything unparseable or unknown is dropped
+    per-key, never bricks startup."""
+    if not isinstance(value, dict):
+        return default
+    out = {}
+    for key, raw in value.items():
+        if not isinstance(key, str) or key not in _WIP_COLUMNS:
+            continue
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if n >= 1:
+            out[key] = n
+    return out
+
+
 _VALIDATORS = {
     "theme": lambda v: _as_str(v, "goldenvintage"),
     "scale": lambda v: _as_float_range(v, 1.0, _SCALE_MIN, _SCALE_MAX),
@@ -68,6 +90,7 @@ _VALIDATORS = {
     "language": lambda v: _as_str(v, "en"),
     "always_on_top": lambda v: _as_bool(v, False),
     "sound_events": lambda v: _as_str_dict(v, {}),
+    "wip_limits": lambda v: _as_wip_limits(v, {}),
     "sound_volume": lambda v: _as_int_range(v, 5, 0, 10),
     "sound_enabled": lambda v: _as_bool(v, True),
     "window_geometry": lambda v: _as_str(v, ""),
@@ -90,6 +113,7 @@ _RAW_DEFAULTS = {
     "language": "en",
     "always_on_top": False,
     "sound_events": {},
+    "wip_limits": {},
     "sound_volume": 5,
     "sound_enabled": True,
     "window_geometry": "",

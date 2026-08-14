@@ -192,6 +192,36 @@ def test_trash_and_restore_ui(app_ctx):
     win.close()
 
 
+def test_wip_limit_badge_and_settings_round_trip(app_ctx):
+    win = _window(app_ctx)
+    plan = app_ctx.plan_store.create("WIP Plan")
+    win._open_plan(plan)
+    controller = app_ctx.controller
+    config = app_ctx.config
+    config.set("single_focus", False)
+    config.set("wip_limits", {"DOING": 1})
+    first = controller.create_ticket("A")
+    second = controller.create_ticket("B")
+    controller.transition(first.ticket_id, DOING)
+    controller.transition(second.ticket_id, DOING)
+    win.board_view.set_search(None)
+    header = win.board_view.columns[DOING].header.text()
+    assert "(2/1)" in header and "!" in header  # over the cap, advisory only
+    # clearing the limit removes the badge marker
+    config.set("wip_limits", {})
+    win.board_view.set_search(None)
+    assert "(2/1)" not in win.board_view.columns[DOING].header.text()
+    # Settings dialog round-trips caps; 0 = no limit is dropped
+    from saiplan.ui.dialogs import SettingsDialog
+
+    names = [t.slug for t in app_ctx.theme_registry.list_themes()]
+    dialog = SettingsDialog(config, names)
+    dialog.wip_spins["DOING"].setValue(3)
+    dialog.wip_spins["TODO"].setValue(0)
+    assert dialog.values()["wip_limits"] == {"DOING": 3}
+    win.close()
+
+
 def test_inspector_attach_flow_and_delete_survival(app_ctx, monkeypatch):
     win = _window(app_ctx)
     plan = app_ctx.plan_store.create("Attach Plan")

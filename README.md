@@ -11,7 +11,10 @@ Version 0.1.1. See [CHANGELOG.md](CHANGELOG.md).
 
 ## What it is
 
-- A kanban **BOARD** with four columns: DOING, TODO, DONE, BLOCKED.
+- A kanban **BOARD** with four columns: DOING, TODO, DONE, BLOCKED, and
+  optional per-column **WIP limits** (Settings) — the badge shows `count/limit`
+  and a `!` warns when a column is over its cap. Advisory only: single-focus
+  is the one hard rule.
 - Plain Markdown files as the source of truth — read them in any editor,
   no database, no cloud, no account, no telemetry.
 - New tickets land in TODO. Start → Done → Block → Reopen are one click or

@@ -207,6 +207,11 @@ class BoardView(QWidget):
 
     def set_search(self, ids: list[str] | None) -> None:
         """Filter columns to the given ticket ids (None = no filter)."""
+        limits = {}
+        single_focus = False
+        if self.controller is not None and self.controller.config is not None:
+            limits = self.controller.config.get("wip_limits") or {}
+            single_focus = bool(self.controller.config.get("single_focus", True))
         for section, col in self.columns.items():
             col.clear()
             for _s, ticket in self.controller.board:
@@ -216,9 +221,12 @@ class BoardView(QWidget):
                     continue
                 col.add_ticket(ticket)
             count = col.count()
-            col.header.setText(f"{section}  ({count})")
-            if section == DOING and count > 1 and self.controller.config.get("single_focus", True):
-                col.header.setText(f"{section}  ({count})  !")
+            limit = limits.get(section)
+            header = f"{section}  ({count}" + (f"/{limit}" if limit else "") + ")"
+            over_limit = bool(limit) and count > limit
+            if (section == DOING and count > 1 and single_focus) or over_limit:
+                header += "  !"
+            col.header.setText(header)
 
     def selected_tickets(self) -> list:
         out = []

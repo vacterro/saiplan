@@ -42,7 +42,10 @@ Hardening release — data integrity and single-writer correctness.
   Unicode-safe names (never overwritten, traversal impossible); removal
   moves the file byte-exact to the plan's attachments trash; ticket
   delete/undo/restore never loses them; `.saiplan` bundles carry them.
-- 322 tests (platform-neutral 316 + subprocess lane 6), ruff clean, Windows
+- Optional per-column WIP limits (Settings): the column badge shows
+  `count/limit` and a `!` when over the cap. Advisory only — single-focus
+  stays the one hard rule; caps survive restart.
+- 326 tests (platform-neutral 320 + subprocess lane 6), ruff clean, Windows
   portable Nuitka build smoke, source/portable manifests verified.
 
 ## 0.1.0 (2026-08-13)

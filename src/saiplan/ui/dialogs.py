@@ -148,6 +148,15 @@ class SettingsDialog(QDialog):
         self.keep_spin.setValue(int(config.get("snapshot_keep", 14)))
         layout.addRow("Keep snapshots", self.keep_spin)
 
+        self.wip_spins: dict[str, QSpinBox] = {}
+        for section in ("DOING", "TODO", "DONE", "BLOCKED"):
+            spin = QSpinBox()
+            spin.setRange(0, 50)
+            spin.setSpecialValueText("no limit")
+            spin.setValue(int((config.get("wip_limits") or {}).get(section, 0)))
+            self.wip_spins[section] = spin
+            layout.addRow(f"WIP limit ({section})", spin)
+
         self.mirror_check = QCheckBox("One-way mirror (write-only backup)")
         self.mirror_check.setChecked(bool(config.get("mirror_enabled", False)))
         layout.addRow(self.mirror_check)
@@ -191,6 +200,11 @@ class SettingsDialog(QDialog):
             "mirror_dir": self.mirror_edit.text().strip(),
             "sound_enabled": self.sound_check.isChecked(),
             "sound_volume": self.volume.value(),
+            "wip_limits": {
+                section: spin.value()
+                for section, spin in self.wip_spins.items()
+                if spin.value() >= 1
+            },
         }
 
 
