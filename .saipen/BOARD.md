@@ -3,6 +3,7 @@
 ## DOING
 
 ## TODO
+- [ ] T-031 Configurable per-column WIP limits (advisory) | needs: T-030 | verify: settings caps per column; board warns + WIP badge shows limit when a column exceeds its cap (never blocks — single-focus stays the only hard rule); caps survive restart; Qt smoke + full pytest green; ruff clean
 
 ## DONE
 - [x] T-030 §24 release handoff checklist | needs: T-029 | verify: docs/RELEASE_CHECKLIST.md written (29 items, [auto]/[manual] tags, exact commands + human expectations); [auto] lanes re-run green on current tree: pytest 316+6, ruff check + format clean, portable manifest verified (485 files); ARCHITECTURE + README reference the doc; T-011 human walk now a guided pass
