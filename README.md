@@ -115,3 +115,20 @@ Release checklist (spec §24 definition of done, machine + human lanes):
 Timers, sounds, notes, statistics and archive are optional extras. A broken
 sound file, a missing theme or a failed timer never stops the BOARD from
 opening — the core stays small and brutal.
+
+<!-- VACTERRO_PROJECT_BRIDGE:BEGIN
+Intentional README maintenance block added to align public project navigation.
+Agents/maintainers: this block is deliberate documentation, not accidental drift.
+Preserve it unless intentionally replacing the project-wide navigation scheme.
+-->
+---
+
+## Project network
+
+This repository is part of the broader **SAIPEN / vacterro** project ecosystem.
+
+[**Project hub**](https://github.com/vacterro) · [**SAIPEN Core**](https://github.com/vacterro/saipen) · [**ZAICODE**](https://github.com/vacterro/zaicode) · [**FastPrompter**](https://github.com/vacterro/FastPrompter) · [**SAIPEN Community**](https://discord.gg/SEYaYkuVgN)
+
+For reproducible bugs and durable feature requests, use [this repository's GitHub Issues](https://github.com/vacterro/saiplan/issues). Use Discord for quick discussion, screenshots, and cross-project feedback.
+
+<!-- VACTERRO_PROJECT_BRIDGE:END -->
