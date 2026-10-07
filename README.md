@@ -1,13 +1,21 @@
+<div align="center">
+
 # SAIPLAN
 
-Write what needs doing. SAIPLAN makes the plan explicit. Do the next thing.
-Nothing gets lost.
+**A local-first Windows planner that turns goals into explicit tickets, one next action at a time.**
 
-SAIPLAN is a lightweight portable Windows planner that exposes SAIPEN-style
-planning to an ordinary human: goal → decompose into clear tickets → BOARD →
-execute → verify → DONE.
+[![Version](https://img.shields.io/badge/version-0.0.1-D4B86A?style=flat-square)](VERSION)
+![Platform](https://img.shields.io/badge/platform-Windows-0078D4?style=flat-square)
+![Storage](https://img.shields.io/badge/storage-plain%20files-6B5A2B?style=flat-square)
+![Cloud](https://img.shields.io/badge/cloud-none-4A7A20?style=flat-square)
 
-Version 0.0.1. See [CHANGELOG.md](CHANGELOG.md).
+[Changelog](CHANGELOG.md) · [Install](#install) · [Usage](#usage) · [Build](#build-from-source)
+
+</div>
+
+**Goal → decompose → BOARD → execute → verify → DONE.**
+
+SAIPLAN brings the useful part of SAIPEN-style planning to ordinary personal work without requiring an AI agent, database, account, telemetry, or hosted service.
 
 ## What it is
 
