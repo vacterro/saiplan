@@ -1,7 +1,13 @@
 """Sounds (extras, spec 12). Sounds are ASSETS, never logic.
 
-- Library: recursive .wav discovery under `sounds/`, enumerated dynamically
-  (no hardcoded count), forward-slash relative names.
+- Library: recursive .wav discovery over a LIST of roots, enumerated
+  dynamically (no hardcoded count), forward-slash relative names.
+- Roots, highest priority first: the user's personal sound pack (an absolute
+  directory the user chose, stored in config), then the tracked
+  redistributable `sounds/` folder that ships with the app. A personal pack
+  is never copied into the repository or the release archive; it is read in
+  place. Precedence means an operator who owns a richer personal library
+  keeps every one of those files and their existing event mappings.
 - Events: per-event `{file, enabled, volume}` mapping persisted in config.
 - Player: QSoundEffect when available, else winsound; preview bypasses toggles;
   a missing/corrupt sound file never crashes the app (silent skip).
@@ -16,34 +22,67 @@ from pathlib import Path
 logger = logging.getLogger("saiplan")
 
 DEFAULT_EVENTS = {
-    "timer_finished": "chime_bell_ding1.wav",
-    "pomodoro_work_done": "success_levelup.wav",
-    "break_finished": "whoosh_digital_small_whoosh.wav",
-    "due_reminder": "notify_notification3.wav",
-    "ticket_done": "success_vote_success.wav",
-    "blocked_warning": "alert_warn01b.wav",
-    "plan_completed": "coin_kaching.wav",
-    "click": "Click.wav",
-    "undo": "menu_launch_upmenu1.wav",
+    "timer_finished": "timer_finished.wav",
+    "pomodoro_work_done": "pomodoro_work_done.wav",
+    "break_finished": "break_finished.wav",
+    "due_reminder": "due_reminder.wav",
+    "ticket_done": "ticket_done.wav",
+    "blocked_warning": "blocked_warning.wav",
+    "plan_completed": "plan_completed.wav",
+    "click": "click.wav",
+    "undo": "undo.wav",
 }
 
 KNOWN_EVENTS = tuple(DEFAULT_EVENTS.keys())
 
 
-class SoundLibrary:
-    """Enumerate all shipped sound assets, dynamically."""
+def _is_private_name(name: str) -> bool:
+    """A `_`-prefixed file or folder stays out of the picker.
 
-    def __init__(self, sounds_dir: Path):
+    The convention is borrowed from the personal-pack layout: a folder the
+    operator marks private is never enumerated, so a scratch area cannot
+    flood the sound dialog."""
+    return name.startswith("_")
+
+
+class SoundLibrary:
+    """Enumerate sound assets across a personal pack and the shipped folder.
+
+    ``sounds_dir`` is the packaged, redistributable root and always has the
+    lowest priority; ``personal_dir`` is an optional absolute path chosen by
+    the operator and has the highest priority. Both may be missing: an empty
+    library is a valid state and must never raise.
+    """
+
+    def __init__(self, sounds_dir: Path, personal_dir: Path | str | None = None):
         self.sounds_dir = Path(sounds_dir).resolve()
+        self.personal_dir = Path(personal_dir).expanduser().resolve() if personal_dir else None
+
+    @property
+    def roots(self) -> list[Path]:
+        """Roots in resolution order, personal pack first."""
+        roots = []
+        if self.personal_dir is not None:
+            roots.append(self.personal_dir)
+        roots.append(self.sounds_dir)
+        return roots
 
     def all_files(self) -> list[str]:
-        """Relative forward-slash names, stable order."""
-        if not self.sounds_dir.is_dir():
-            return []
-        out = []
-        for path in sorted(self.sounds_dir.rglob("*.wav")):
-            out.append(path.relative_to(self.sounds_dir).as_posix())
-        return out
+        """Relative forward-slash names, stable order, personal pack first.
+
+        A name present in both roots appears once: the personal file wins,
+        which is what "keep my library and my mappings" has to mean when the
+        two libraries share a file name."""
+        seen: dict[str, None] = {}
+        for root in self.roots:
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*.wav")):
+                rel = path.relative_to(root)
+                if any(_is_private_name(part) for part in rel.parts):
+                    continue
+                seen.setdefault(rel.as_posix(), None)
+        return list(seen)
 
     def count(self) -> int:
         return len(self.all_files())
@@ -52,7 +91,7 @@ class SoundLibrary:
         """Resolve a relative name to a real file (or None if missing).
 
         Platform-neutral via PurePosixPath parts; the result MUST stay inside
-        the sounds dir — `../` escapes are rejected outright."""
+        the root it was found in — `../` escapes are rejected outright."""
         if not rel:
             return None
         try:
@@ -61,21 +100,30 @@ class SoundLibrary:
             parts = PurePosixPath(rel).parts
             if not parts or ".." in parts:
                 return None
-            candidate = self.sounds_dir.joinpath(*parts).resolve()
         except (ValueError, OSError):
             return None
-        if self.sounds_dir not in candidate.parents and candidate != self.sounds_dir:
-            return None
-        if candidate.is_file():
-            return candidate
+        for root in self.roots:
+            if not root.is_dir():
+                continue
+            try:
+                candidate = root.joinpath(*parts).resolve()
+            except (ValueError, OSError):
+                continue
+            if root not in candidate.parents and candidate != root:
+                continue
+            if candidate.is_file():
+                return candidate
         return None
+
 
 
 class SoundRegistry:
     """Per-event mapping, persisted through the app config dict.
 
     Stale names heal on load: if the mapped file no longer exists the event
-    falls back to its default file, then to none — never to a crash.
+    falls back to its default file, then to none — never to a crash. The name
+    the operator originally chose is kept in ``requested`` so a personal pack
+    added later can satisfy it again; healing never erases user intent.
     """
 
     def __init__(self, library: SoundLibrary, events: dict | None = None):
@@ -88,12 +136,14 @@ class SoundRegistry:
     def _normalize(self, events, event: str, default: str) -> dict:
         default = default if default in self._available else ""
         if not isinstance(events, dict):
-            return {"file": default, "enabled": True, "volume": 1.0}
+            return {"file": default, "enabled": True, "volume": 1.0, "requested": ""}
         entry = events.get(event)
         if not isinstance(entry, dict):
-            return {"file": default, "enabled": True, "volume": 1.0}
+            return {"file": default, "enabled": True, "volume": 1.0, "requested": ""}
         requested = entry.get("file")
-        file = requested if isinstance(requested, str) and requested in self._available else default
+        if not (isinstance(requested, str) and requested in self._available):
+            requested = ""
+        file = requested or default
         enabled = entry.get("enabled", True)
         if not isinstance(enabled, bool):
             enabled = True
@@ -107,6 +157,7 @@ class SoundRegistry:
             "file": file,
             "enabled": enabled,
             "volume": max(0.0, min(1.0, volume)),
+            "requested": requested,
         }
 
     def to_config(self) -> dict:
@@ -120,6 +171,7 @@ class SoundRegistry:
         entry = self.events[event]
         if file in self._available:
             entry["file"] = file
+            entry["requested"] = file
         if enabled is not None:
             entry["enabled"] = enabled
         if volume is not None:

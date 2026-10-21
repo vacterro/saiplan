@@ -19,3 +19,9 @@ extensions/saitranslate/
 
 .saipen/extensions/
 .saipen/saitranslate/
+
+# Personal sound packs stay on the machine that owns them. The repository
+# ships only the synthesized fallback listed in sounds-redistributable.manifest.
+sounds/personal/
+sounds/_personal/
+sounds-redistributable.local.manifest

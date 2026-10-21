@@ -1,5 +1,5 @@
 """Sounds (spec 12/19): dynamic enumeration, event mapping, stale-name heal,
-missing file safety."""
+missing file safety, personal pack precedence."""
 
 from pathlib import Path
 
@@ -14,14 +14,30 @@ from saiplan.extras.sounds import (
 )
 
 SOUNDS_DIR = Path(__file__).resolve().parents[1] / "sounds"
+MANIFEST = Path(__file__).resolve().parents[1] / "sounds-redistributable.manifest"
+
+
+def _manifest_names() -> set[str]:
+    return {
+        line.strip().replace("\\", "/")
+        for line in MANIFEST.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
 
 
 def test_library_enumerates_dynamically():
     lib = SoundLibrary(SOUNDS_DIR)
     files = lib.all_files()
-    assert len(files) == 414
+    assert len(files) == len(_manifest_names())
     assert all(f.endswith(".wav") for f in files)
-    assert all("/" not in f or f.startswith("cs_style/") for f in files)
+    assert files == sorted(files)
+
+
+def test_shipped_sounds_match_the_redistributable_manifest():
+    """Only allowlisted, synthesized sounds may ship in the repository."""
+    lib = SoundLibrary(SOUNDS_DIR)
+    shipped = set(lib.all_files())
+    assert shipped == _manifest_names()
 
 
 def test_library_no_hardcoded_count(tmp_path):
@@ -88,10 +104,10 @@ def test_registry_normalizes_stale_names(tmp_path):
 
 
 def test_registry_defaults_on_missing_entry(tmp_path):
-    (tmp_path / "chime_bell_ding1.wav").write_bytes(b"RIFF")
+    (tmp_path / "timer_finished.wav").write_bytes(b"RIFF")
     lib = SoundLibrary(tmp_path)
     reg = SoundRegistry(lib, None)
-    assert reg.file_for("timer_finished") == tmp_path / "chime_bell_ding1.wav"
+    assert reg.file_for("timer_finished") == tmp_path / "timer_finished.wav"
 
 
 @pytest.mark.parametrize(
@@ -143,3 +159,112 @@ def test_player_volume_clamped(tmp_path):
     player = SoundPlayer()
     player.play_file(tmp_path / "a.wav", 3.0)  # clamped, no crash
     player.play_file(tmp_path / "a.wav", -1.0)  # clamped, no crash
+
+
+# ---------------------------------------------------------------------------
+# Personal sound pack: precedence, isolation, missing-folder safety
+# ---------------------------------------------------------------------------
+
+
+def test_personal_pack_wins_over_shipped_file(tmp_path):
+    shipped = tmp_path / "shipped"
+    personal = tmp_path / "personal"
+    shipped.mkdir()
+    personal.mkdir()
+    (shipped / "click.wav").write_bytes(b"RIFF-shipped")
+    (personal / "click.wav").write_bytes(b"RIFF-personal")
+
+    lib = SoundLibrary(shipped, personal)
+    assert lib.all_files() == ["click.wav"]
+    assert lib.path_for("click.wav").read_bytes() == b"RIFF-personal"
+
+
+def test_personal_pack_adds_files_without_copying_them(tmp_path):
+    shipped = tmp_path / "shipped"
+    personal = tmp_path / "personal"
+    shipped.mkdir()
+    personal.mkdir()
+    (shipped / "click.wav").write_bytes(b"RIFF")
+    (personal / "GENIE.wav").write_bytes(b"RIFF-personal")
+
+    lib = SoundLibrary(shipped, personal)
+    assert set(lib.all_files()) == {"click.wav", "GENIE.wav"}
+    # The personal file is read in place, never duplicated into the shipped root.
+    assert sorted(p.name for p in shipped.iterdir()) == ["click.wav"]
+    assert lib.path_for("GENIE.wav") == (personal / "GENIE.wav").resolve()
+
+
+def test_personal_pack_can_provide_every_sound(tmp_path):
+    """A public build with no personal pack still ships a complete palette."""
+    personal = tmp_path / "empty"
+    personal.mkdir()
+    lib = SoundLibrary(SOUNDS_DIR, personal)
+    assert set(lib.all_files()) == _manifest_names()
+
+
+def test_missing_personal_pack_is_not_an_error(tmp_path):
+    lib = SoundLibrary(SOUNDS_DIR, tmp_path / "does-not-exist")
+    assert lib.count() == len(_manifest_names())
+    (tmp_path / "gone.wav").write_bytes(b"RIFF")
+    lib = SoundLibrary(SOUNDS_DIR, tmp_path / "gone.wav")  # a FILE, not a dir
+    assert lib.count() == len(_manifest_names())
+
+
+def test_personal_pack_traversal_does_not_escape(tmp_path):
+    shipped = tmp_path / "shipped"
+    personal = tmp_path / "personal"
+    shipped.mkdir()
+    personal.mkdir()
+    (tmp_path / "outside.wav").write_bytes(b"RIFF")
+    lib = SoundLibrary(shipped, personal)
+    assert lib.path_for("../outside.wav") is None
+    assert lib.path_for("../../outside.wav") is None
+
+
+def test_private_folders_stay_out_of_the_picker(tmp_path):
+    shipped = tmp_path / "shipped"
+    personal = tmp_path / "personal"
+    shipped.mkdir()
+    personal.mkdir()
+    (personal / "public.wav").write_bytes(b"RIFF")
+    (personal / "_scratch").mkdir()
+    (personal / "_scratch" / "hidden.wav").write_bytes(b"RIFF")
+    lib = SoundLibrary(shipped, personal)
+    assert lib.all_files() == ["public.wav"]
+
+
+def test_switching_packs_keeps_the_saved_choice(tmp_path):
+    shipped = tmp_path / "shipped"
+    pack_a = tmp_path / "a"
+    pack_b = tmp_path / "b"
+    for directory in (shipped, pack_a, pack_b):
+        directory.mkdir()
+    (shipped / "click.wav").write_bytes(b"RIFF")
+    (pack_a / "my_click.wav").write_bytes(b"RIFF")
+    (pack_b / "my_click.wav").write_bytes(b"RIFF")
+
+    reg_a = SoundRegistry(SoundLibrary(shipped, pack_a))
+    reg_a.set("click", "my_click.wav")
+    saved = reg_a.to_config()
+
+    # Pack gone for a session: the event falls back but the choice is retained.
+    reg_missing = SoundRegistry(SoundLibrary(shipped, tmp_path / "gone"), saved)
+    assert reg_missing.events["click"]["file"] == "click.wav"
+    assert reg_missing.events["click"]["requested"] == ""
+
+    reg_b = SoundRegistry(SoundLibrary(shipped, pack_b), saved)
+    assert reg_b.events["click"]["file"] == "my_click.wav"
+    assert reg_b.events["click"]["enabled"] is True
+    assert reg_b.to_config()["click"]["volume"] == saved["click"]["volume"]
+
+
+def test_legacy_config_without_pack_dir_loads(tmp_path):
+    reg = SoundRegistry(SoundLibrary(SOUNDS_DIR), {"click": {"file": "click.wav"}})
+    assert reg.events["click"]["file"] == "click.wav"
+    assert reg.events["click"]["volume"] == 1.0
+
+
+def test_unknown_legacy_sound_heals_to_default_without_crash(tmp_path):
+    reg = SoundRegistry(SoundLibrary(SOUNDS_DIR), {"click": {"file": "GENIE.wav"}})
+    assert reg.events["click"]["file"] == "click.wav"
+    assert reg.file_for("click") is not None

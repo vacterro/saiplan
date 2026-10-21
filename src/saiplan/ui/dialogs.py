@@ -181,6 +181,23 @@ class SettingsDialog(QDialog):
         self.volume.setValue(int(config.get("sound_volume", 5)))
         layout.addRow("Volume", self.volume)
 
+        # Personal sound pack: a folder the operator already owns. It is read
+        # in place and never copied into the repository or the release, so the
+        # app can use a private library while distributing only its own sounds.
+        self.pack_edit = QLineEdit(str(config.get("sound_pack_dir", "")))
+        self.pack_edit.setPlaceholderText("Optional folder with your own .wav files")
+        pack_browse = QPushButton("Browse...")
+        pack_browse.clicked.connect(self._browse_pack)
+        pack_row = QHBoxLayout()
+        pack_row.addWidget(self.pack_edit, 1)
+        pack_row.addWidget(pack_browse)
+        layout.addRow("Personal sound pack", pack_row)
+        pack_hint = QLabel(
+            "Files in this folder take priority over the built-in sounds and stay on this machine."
+        )
+        pack_hint.setObjectName("sectionTitle")
+        layout.addRow(pack_hint)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -193,6 +210,11 @@ class SettingsDialog(QDialog):
         if path:
             self.mirror_edit.setText(path)
 
+    def _browse_pack(self):
+        path = QFileDialog.getExistingDirectory(self, "Personal sound pack")
+        if path:
+            self.pack_edit.setText(path)
+
     def values(self) -> dict:
         return {
             "theme": self.theme_combo.currentText(),
@@ -204,6 +226,7 @@ class SettingsDialog(QDialog):
             "mirror_dir": self.mirror_edit.text().strip(),
             "sound_enabled": self.sound_check.isChecked(),
             "sound_volume": self.volume.value(),
+            "sound_pack_dir": self.pack_edit.text().strip(),
             "wip_limits": {
                 section: spin.value()
                 for section, spin in self.wip_spins.items()

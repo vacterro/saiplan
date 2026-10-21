@@ -92,7 +92,9 @@ class App:
         self.theme_registry = theme_registry or ThemeRegistry(layout["themes"])
         self.plan_store = PlanStore(layout["plans"])
         try:
-            self.sound_library = SoundLibrary(layout["sounds"])
+            self.sound_library = SoundLibrary(
+                layout["sounds"], config.get("sound_pack_dir") or None
+            )
             self.sound_registry = SoundRegistry(
                 self.sound_library, config.get("sound_events") or {}
             )
@@ -802,10 +804,24 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.app.config, names, self)
         if dialog.exec() != SettingsDialog.DialogCode.Accepted:
             return
+        previous_pack = self.app.config.get("sound_pack_dir", "")
         values = dialog.values()
         for key, value in values.items():
             self.app.config.set(key, value)
         self.app.config.save()
+        if values.get("sound_pack_dir", "") != previous_pack:
+            # Rebuild the library against the new pack. The registry keeps the
+            # saved event mappings, so switching packs never loses a choice.
+            try:
+                self.app.sound_library = SoundLibrary(
+                    self.app.layout["sounds"],
+                    self.app.config.get("sound_pack_dir") or None,
+                )
+                self.app.sound_registry = SoundRegistry(
+                    self.app.sound_library, self.app.config.get("sound_events") or {}
+                )
+            except Exception as error:  # noqa: BLE001 - a bad folder must not break the UI
+                self.status.showMessage(f"Personal sound pack unavailable: {error}")
         self._apply_theme()
         # always-on-top must be applied in BOTH directions, not just True
         self.setWindowFlag(

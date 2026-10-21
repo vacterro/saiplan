@@ -12,7 +12,7 @@ if (-not $AllowDirty -and $GitStatus) {
 Remove-Item -Recurse -Force (Split-Path -Parent $Stage) -ErrorAction SilentlyContinue
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue
 $AllowedDirs = @("src/", "tests/", "docs/", "themes/", "sounds/", "scripts/")
-$AllowedFiles = @("README.md", "CHANGELOG.md", "VERSION", "pyproject.toml", ".gitignore", "main.py", "build_windows.ps1", "bootstrap-build-env.ps1", "requirements-build.lock")
+$AllowedFiles = @("README.md", "CHANGELOG.md", "VERSION", "pyproject.toml", ".gitignore", "main.py", "build_windows.ps1", "bootstrap-build-env.ps1", "requirements-build.lock", "sounds-redistributable.manifest")
 $Files = git -C $Root ls-files
 if ($AllowDirty) {
   $Files += git -C $Root ls-files --others --exclude-standard
